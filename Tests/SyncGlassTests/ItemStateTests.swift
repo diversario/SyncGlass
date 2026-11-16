@@ -2,44 +2,64 @@ import Foundation
 import Testing
 @testable import SyncGlass
 
-@Suite struct PhaseTests {
+@Suite struct ItemStateTests {
     @Test func uploadedAndIdleIsCurrent() {
         #expect(ItemState().phase(trackDownloads: true) == .current)
     }
 
-    @Test func notUploadedIsInFlight() {
-        #expect(ItemState(isUploaded: false).phase(trackDownloads: false) == .inFlight(isDownload: false))
+    @Test func notUploadedIsWaitingWithoutAnActiveArrow() {
+        #expect(ItemState(isUploaded: false).phase(trackDownloads: true)
+            == .inFlight(active: [], waitingUpload: true))
     }
 
-    @Test func uploadingIsInFlight() {
-        #expect(ItemState(isUploading: true).phase(trackDownloads: false) == .inFlight(isDownload: false))
+    @Test func uploadingIsActiveRatherThanWaiting() {
+        #expect(ItemState(isUploaded: false, isUploading: true).phase(trackDownloads: true)
+            == .inFlight(active: .upload, waitingUpload: false))
+    }
+
+    @Test func bothFlagsRemainBothDirections() {
+        #expect(ItemState(isUploading: true, isDownloading: true).phase(trackDownloads: true)
+            == .inFlight(active: [.upload, .download], waitingUpload: false))
+    }
+
+    @Test func waitingUploadCanAlsoBeDownloading() {
+        #expect(ItemState(isUploaded: false, isDownloading: true).phase(trackDownloads: true)
+            == .inFlight(active: .download, waitingUpload: true))
     }
 
     @Test func downloadCountsOnlyWhenTracked() {
         let state = ItemState(isDownloading: true)
-        #expect(state.phase(trackDownloads: true) == .inFlight(isDownload: true))
+        #expect(state.phase(trackDownloads: true) == .inFlight(active: .download, waitingUpload: false))
         #expect(state.phase(trackDownloads: false) == .current)
     }
 
-    @Test func missingPathIsIgnored() {
+    @Test func cloudOnlyDoesNotImplyActiveDownload() {
+        #expect(ItemState(isCurrent: false).phase(trackDownloads: true) == .current)
+    }
+
+    @Test func missingAndNonUbiquitousPathsAreIgnored() {
         #expect(ItemState(exists: false, isUploaded: false).phase(trackDownloads: true) == .ignored)
+        #expect(ItemState(isUbiquitous: false, isUploaded: false).phase(trackDownloads: true) == .ignored)
     }
 
-    /// A path outside iCloud reports no upload state, which reads as "not
-    /// uploaded". It used to stay in the transfer list forever.
-    @Test func pathOutsideICloudIsIgnored() {
-        let state = ItemState(isUbiquitous: false, isUploaded: false)
-        #expect(state.phase(trackDownloads: true) == .ignored)
+    @Test func metadataFailureIsNotDeletionOrCompletion() {
+        #expect(ItemState(exists: false, metadataError: "Permission denied").phase(trackDownloads: true)
+            == .unavailable("Permission denied"))
     }
 
-    @Test func containsBytes() {
+    @Test func reportedTransferErrorDoesNotDiscardActivity() {
+        let state = ItemState(isUploading: true, transferError: "Account access temporarily unavailable")
+        #expect(state.phase(trackDownloads: true) == .inFlight(active: .upload, waitingUpload: false))
+        #expect(state.transferError == "Account access temporarily unavailable")
+    }
+
+    @Test func containsBytesDoesNotRequireRecursivePackageSizing() {
         #expect(ItemState(fileSize: 1).containsBytes)
-        #expect(ItemState(isDirectory: true).containsBytes)
+        #expect(ItemState(isDirectory: true, isPackage: true).containsBytes)
         #expect(!ItemState(fileSize: 0).containsBytes)
     }
 }
-
-/// `ItemState(path:)` on files in a temporary folder, which is not in iCloud.
+/// File metadata outside iCloud.
 /// Each test gets its own folder; `deinit` deletes it.
 @Suite final class ItemStateFileTests {
     let folder: URL
@@ -61,7 +81,7 @@ import Testing
     }
 
     @Test func regularFile() throws {
-        let state = ItemState(path: try file("a.txt"))
+        let state = ItemState(url: URL(fileURLWithPath: try file("a.txt")))
         #expect(state.exists)
         #expect(!state.isUbiquitous)
         #expect(!state.isDirectory)
@@ -71,15 +91,15 @@ import Testing
     }
 
     @Test func emptyFileContainsNoBytes() throws {
-        #expect(!ItemState(path: try file("empty.txt", contents: "")).containsBytes)
+        #expect(!ItemState(url: URL(fileURLWithPath: try file("empty.txt", contents: ""))).containsBytes)
     }
 
     @Test func hiddenFile() throws {
-        #expect(ItemState(path: try file(".hidden")).isHidden)
+        #expect(ItemState(url: URL(fileURLWithPath: try file(".hidden"))).isHidden)
     }
 
     @Test func directory() {
-        let state = ItemState(path: folder.path)
+        let state = ItemState(url: folder)
         #expect(state.isDirectory)
         #expect(state.containsBytes)
     }
@@ -88,11 +108,11 @@ import Testing
         let target = try file("target.txt")
         let link = folder.appendingPathComponent("link").path
         try FileManager.default.createSymbolicLink(atPath: link, withDestinationPath: target)
-        #expect(ItemState(path: link).isSymbolicLink)
+        #expect(ItemState(url: URL(fileURLWithPath: link)).isSymbolicLink)
     }
 
     @Test func missingPath() {
-        let state = ItemState(path: folder.appendingPathComponent("missing").path)
+        let state = ItemState(url: folder.appendingPathComponent("missing"))
         #expect(!state.exists)
         #expect(state.phase(trackDownloads: true) == .ignored)
     }

@@ -1,6 +1,6 @@
 import Foundation
 
-/// Byte progress of one file that iCloud is uploading or downloading.
+/// Byte counts published for one file operation.
 struct FileProgress: Equatable {
     enum Direction { case uploading, downloading }
 
@@ -8,73 +8,95 @@ struct FileProgress: Equatable {
     var fraction: Double
     var completedBytes: Int64
     var totalBytes: Int64
+
+    static func read(_ progress: Progress) -> FileProgress? {
+        guard progress.kind == .file, !progress.isIndeterminate, !progress.isCancelled,
+              progress.totalUnitCount > 0, progress.completedUnitCount >= 0 else { return nil }
+        let direction: Direction?
+        switch progress.fileOperationKind {
+        case .uploading?: direction = .uploading
+        case .downloading?: direction = .downloading
+        default: direction = nil
+        }
+        let total = progress.totalUnitCount
+        let completed = min(total, progress.completedUnitCount)
+        return Self(direction: direction, fraction: Double(completed) / Double(total),
+                    completedBytes: completed, totalBytes: total)
+    }
+
+    func matches(_ item: TransferItem, direction: TransferDirection) -> Bool {
+        guard totalBytes > 0, completedBytes >= 0, item.active.contains(direction.flag) else { return false }
+        switch self.direction {
+        case .uploading?: return direction == .upload
+        case .downloading?: return direction == .download
+        case nil: return item.active == direction.flag
+        }
+    }
 }
 
-/// Per-file upload and download progress, from the `Progress` objects that the
-/// iCloud Drive file provider publishes for files it transfers.
-///
-/// Measured on macOS 27:
-/// - These progress objects report bytes from 0 to 100 % during uploads and
-///   downloads. `NSURLUbiquitousItemPercentUploadedKey` stays nil, and an
-///   `NSMetadataQuery` on the folder returns no items.
-/// - `Progress.addSubscriber(forFileURL:)` on a folder only receives the progress
-///   of files directly inside it, not in subfolders, and the progress objects it
-///   receives do not always carry `NSProgressFileURLKey`.
-///
-/// So the monitor subscribes to each file in flight, which ties every progress
-/// object to a known path.
+/// Subscriptions exist only while a panel or an on-demand file window needs them.
 final class FileProgressMonitor: @unchecked Sendable {
-    /// Upper bound on subscriptions during a large sync.
     static let maxSubscriptions = 500
 
+    private struct Entry {
+        let generation: UUID
+        var token: Any?
+        var progress: Progress?
+    }
+
     private let lock = NSLock()
-    private var subscriptions: [String: Any] = [:]
-    private var progresses: [String: Progress] = [:]
+    private var entries: [String: Entry] = [:]
 
-    deinit { track([]) }
+    deinit { track([String]()) }
 
-    /// Subscribe to the paths in flight and drop the subscriptions of paths that finished.
-    func track(_ paths: Set<String>) {
-        let wanted = Set(paths.prefix(Self.maxSubscriptions))
-        let (added, removed): ([String], [Any]) = withLock {
-            let stale = subscriptions.filter { !wanted.contains($0.key) }
-            for path in stale.keys {
-                subscriptions[path] = nil
-                progresses[path] = nil
-            }
-            return (wanted.filter { subscriptions[$0] == nil }, Array(stale.values))
+    var subscriptionCount: Int { withLock { entries.count } }
+
+    func track(_ paths: Set<String>) { track(paths.sorted()) }
+
+    /// Earlier paths get priority when the subscription ceiling is reached.
+    func track(_ paths: [String]) {
+        var wanted = Set<String>()
+        var ordered: [String] = []
+        for path in paths where wanted.count < Self.maxSubscriptions {
+            if wanted.insert(path).inserted { ordered.append(path) }
+        }
+        let removed: [Any] = withLock {
+            let stale = entries.keys.filter { !wanted.contains($0) }
+            return stale.compactMap { entries.removeValue(forKey: $0)?.token }
         }
         removed.forEach(Progress.removeSubscriber)
-
-        for path in added {
+        for path in ordered {
+            let generation = UUID()
+            let added = withLock {
+                guard entries[path] == nil else { return false }
+                entries[path] = Entry(generation: generation)
+                return true
+            }
+            guard added else { continue }
             let token = Progress.addSubscriber(forFileURL: URL(fileURLWithPath: path)) { [weak self] progress in
-                self?.withLock { self?.progresses[path] = progress }
+                self?.withLock {
+                    guard self?.entries[path]?.generation == generation else { return }
+                    self?.entries[path]?.progress = progress
+                }
                 return { [weak self] in
                     self?.withLock {
-                        if self?.progresses[path] === progress { self?.progresses[path] = nil }
+                        guard self?.entries[path]?.generation == generation,
+                              self?.entries[path]?.progress === progress else { return }
+                        self?.entries[path]?.progress = nil
                     }
                 }
             }
-            withLock { subscriptions[path] = token }
+            let retained = withLock {
+                guard entries[path]?.generation == generation else { return false }
+                entries[path]?.token = token
+                return true
+            }
+            if !retained { Progress.removeSubscriber(token) }
         }
     }
 
-    /// Progress of the tracked files that iCloud is transferring now.
     func progressByPath() -> [String: FileProgress] {
-        let current = withLock { progresses }
-        return current.mapValues { p in
-            let direction: FileProgress.Direction?
-            switch p.fileOperationKind {
-            case .uploading?: direction = .uploading
-            case .downloading?: direction = .downloading
-            default: direction = nil
-            }
-            return FileProgress(
-                direction: direction,
-                fraction: min(1, max(0, p.fractionCompleted)),
-                completedBytes: p.completedUnitCount,
-                totalBytes: p.totalUnitCount)
-        }
+        withLock { entries.compactMapValues { $0.progress.flatMap(FileProgress.read) } }
     }
 
     @discardableResult

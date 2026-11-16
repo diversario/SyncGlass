@@ -13,34 +13,54 @@ struct ItemState {
     let isHidden: Bool
     let isSymbolicLink: Bool
     let fileSize: Int
+    /// A failed read is not evidence that a path was deleted or completed.
+    let metadataError: String?
+    let transferError: String?
 
     private static let keys: Set<URLResourceKey> = [
         .isUbiquitousItemKey, .ubiquitousItemIsUploadedKey, .ubiquitousItemIsUploadingKey,
         .ubiquitousItemIsDownloadingKey, .ubiquitousItemDownloadingStatusKey,
+        .ubiquitousItemUploadingErrorKey, .ubiquitousItemDownloadingErrorKey,
         .isDirectoryKey, .isPackageKey, .isHiddenKey, .isSymbolicLinkKey, .fileSizeKey,
     ]
+    static let prefetchKeys = Array(keys)
 
-    init(path: String) {
-        let url = URL(fileURLWithPath: path)
-        // FileManager.fileExists follows symlinks.
-        exists = FileManager.default.fileExists(atPath: path)
-        let v = try? url.resourceValues(forKeys: Self.keys)
-        isUbiquitous = v?.isUbiquitousItem ?? false
-        isUploaded = v?.ubiquitousItemIsUploaded ?? false
-        isUploading = v?.ubiquitousItemIsUploading ?? false
-        isDownloading = v?.ubiquitousItemIsDownloading ?? false
-        isCurrent = v?.ubiquitousItemDownloadingStatus == .current
-        isDirectory = v?.isDirectory ?? false
-        isPackage = v?.isPackage ?? false
-        isHidden = v?.isHidden ?? false
-        isSymbolicLink = v?.isSymbolicLink ?? false
-        fileSize = v?.fileSize ?? 0
+    init(url: URL) {
+        do {
+            let v = try url.resourceValues(forKeys: Self.keys)
+            self.init(
+                isUbiquitous: v.isUbiquitousItem ?? false,
+                isUploaded: v.ubiquitousItemIsUploaded ?? false,
+                isUploading: v.ubiquitousItemIsUploading ?? false,
+                isDownloading: v.ubiquitousItemIsDownloading ?? false,
+                isCurrent: v.ubiquitousItemDownloadingStatus == .current,
+                isDirectory: v.isDirectory ?? false, isPackage: v.isPackage ?? false,
+                isHidden: v.isHidden ?? false, isSymbolicLink: v.isSymbolicLink ?? false,
+                fileSize: v.fileSize ?? 0,
+                transferError: [v.ubiquitousItemUploadingError, v.ubiquitousItemDownloadingError]
+                    .compactMap { $0?.localizedDescription }.joined(separator: "\n").nilIfEmpty)
+        } catch {
+            let error = error as NSError
+            // fileExists returns false for permission failures as well as absence.
+            // Only a specific no-such-file error confirms removal.
+            let missing = Self.isMissing(error)
+            self.init(exists: !missing, metadataError: missing ? nil : error.localizedDescription)
+        }
+    }
+
+    private static func isMissing(_ error: NSError) -> Bool {
+        if error.domain == NSCocoaErrorDomain,
+           error.code == NSFileNoSuchFileError || error.code == NSFileReadNoSuchFileError { return true }
+        if error.domain == NSPOSIXErrorDomain, error.code == Int(ENOENT) { return true }
+        if let underlying = error.userInfo[NSUnderlyingErrorKey] as? NSError { return isMissing(underlying) }
+        return false
     }
 
     /// A state with the given values, without reading the file system.
     init(exists: Bool = true, isUbiquitous: Bool = true, isUploaded: Bool = true, isUploading: Bool = false,
          isDownloading: Bool = false, isCurrent: Bool = true, isDirectory: Bool = false, isPackage: Bool = false,
-         isHidden: Bool = false, isSymbolicLink: Bool = false, fileSize: Int = 0) {
+         isHidden: Bool = false, isSymbolicLink: Bool = false, fileSize: Int = 0,
+         metadataError: String? = nil, transferError: String? = nil) {
         self.exists = exists
         self.isUbiquitous = isUbiquitous
         self.isUploaded = isUploaded
@@ -52,30 +72,35 @@ struct ItemState {
         self.isHidden = isHidden
         self.isSymbolicLink = isSymbolicLink
         self.fileSize = fileSize
+        self.metadataError = metadataError
+        self.transferError = transferError
     }
 
-    /// Whether the item has content worth tracking: a non-empty file, or a folder.
     var containsBytes: Bool { fileSize != 0 || isDirectory }
 
     enum Phase: Equatable {
-        /// The path no longer exists, or it is not in iCloud, such as a path
-        /// inside a `.nosync` folder. Such a path has no upload state.
         case ignored
-        /// In transfer. `isDownload` is true when the item is uploaded and downloading.
-        case inFlight(isDownload: Bool)
-        /// Uploaded, not uploading and (when downloads are tracked) not downloading.
+        case unavailable(String)
+        case inFlight(active: TransferDirections, waitingUpload: Bool)
         case current
     }
 
-    /// A path stays in flight until it reports uploaded, not uploading and (when
-    /// "Track incoming downloads" is on) not downloading.
     func phase(trackDownloads: Bool) -> Phase {
+        if let metadataError { return .unavailable(metadataError) }
         guard exists, isUbiquitous else { return .ignored }
-        if !isUploaded || isUploading || (trackDownloads && isDownloading) {
-            return .inFlight(isDownload: isUploaded && isDownloading)
+        var active: TransferDirections = []
+        if isUploading { active.insert(.upload) }
+        if trackDownloads && isDownloading { active.insert(.download) }
+        let waitingUpload = !isUploaded && !isUploading
+        if !active.isEmpty || waitingUpload {
+            return .inFlight(active: active, waitingUpload: waitingUpload)
         }
         return .current
     }
+}
+
+private extension String {
+    var nilIfEmpty: String? { isEmpty ? nil : self }
 }
 
 enum PathChecks {
@@ -142,14 +167,4 @@ enum PathChecks {
         return "\(f.string(from: NSNumber(value: value)) ?? "0") \(units[i])B"
     }
 
-    static func directorySize(_ path: String) -> Int {
-        guard let e = FileManager.default.enumerator(
-            at: URL(fileURLWithPath: path), includingPropertiesForKeys: [.fileSizeKey]
-        ) else { return 0 }
-        var total = 0
-        for case let url as URL in e {
-            total += (try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
-        }
-        return total
-    }
 }

@@ -1,7 +1,6 @@
 #!/bin/sh
 # Build build/SyncGlass.app, a universal binary (arm64 + x86_64), with the login
-# helper embedded in Contents/Library/LoginItems and Sparkle.framework in
-# Contents/Frameworks.
+# helper embedded in Contents/Library/LoginItems.
 #
 # Signing: set SIGN_IDENTITY to a "Developer ID Application" identity (see
 # `security find-identity -v -p codesigning`), e.g.
@@ -46,12 +45,9 @@ done
 APP=build/SyncGlass.app
 HELPER="$APP/Contents/Library/LoginItems/SyncGlassLoginHelper.app"
 rm -rf "$APP"
-SPARKLE="$APP/Contents/Frameworks/Sparkle.framework"
-mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources" "$APP/Contents/Frameworks" "$HELPER/Contents/MacOS"
+mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources" "$HELPER/Contents/MacOS"
 
 cp "$BIN/SyncGlass" "$APP/Contents/MacOS/SyncGlass"
-# ditto keeps the symbolic links inside the framework.
-ditto "$BIN/Sparkle.framework" "$SPARKLE"
 cp Resources/Info.plist "$APP/Contents/Info.plist"
 cp "$BIN/LoginHelper" "$HELPER/Contents/MacOS/SyncGlassLoginHelper"
 cp Resources/LoginHelper-Info.plist "$HELPER/Contents/Info.plist"
@@ -64,24 +60,14 @@ xcrun actool Resources/AppIcon.icon --compile "$APP/Contents/Resources" \
     --output-partial-info-plist build/AppIcon-partial.plist >/dev/null
 
 # A secure timestamp needs Apple's timestamp server; ad-hoc signatures cannot have one.
-# The hardened runtime is for notarization only: it turns on library validation,
-# which on macOS 27 refuses to load the ad-hoc-signed Sparkle into an ad-hoc app
-# ("different Team IDs"), so ad-hoc builds go without it.
+# Use the hardened runtime only for Developer ID signing.
 if [ "$IDENTITY" = "-" ]; then
     TIMESTAMP="--timestamp=none"; RUNTIME=""
 else
     TIMESTAMP="--timestamp"; RUNTIME="--options runtime"
 fi
 
-# Sign inside out: Sparkle's helpers, Sparkle, the login helper, then the app
-# that contains them. The order and the flags follow Sparkle's documentation
-# ("Code Signing", sparkle-project.org/documentation/sandboxing).
-SIGN="codesign --force $RUNTIME $TIMESTAMP --sign"
-$SIGN "$IDENTITY" "$SPARKLE/Versions/B/XPCServices/Installer.xpc"
-$SIGN "$IDENTITY" --preserve-metadata=entitlements "$SPARKLE/Versions/B/XPCServices/Downloader.xpc"
-$SIGN "$IDENTITY" "$SPARKLE/Versions/B/Autoupdate"
-$SIGN "$IDENTITY" "$SPARKLE/Versions/B/Updater.app"
-$SIGN "$IDENTITY" "$SPARKLE"
+# Sign inside out: the login helper, then the app that contains it.
 # shellcheck disable=SC2086
 codesign --force $RUNTIME "$TIMESTAMP" --sign "$IDENTITY" "$HELPER"
 # shellcheck disable=SC2086

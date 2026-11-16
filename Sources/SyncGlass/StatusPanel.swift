@@ -1,575 +1,260 @@
 import AppKit
 import SwiftUI
 
-/// The window shown from the menu-bar icon, with the Transfers and Recent lists.
-struct StatusPanel: View {
-    @Bindable var model: StatusModel
-    @Environment(\.openSettings) private var openSettings
-    @Environment(\.dismiss) private var dismiss
+/// Layout shared by the native window and its content. Progress never changes it.
+enum StatusPanelLayout {
+    static let rowHeight: CGFloat = 32
+    static let chromeHeight: CGFloat = 279
 
-    var body: some View {
-        VStack(spacing: 12) {
-            header
-            if model.snapshot.status == .transferring && model.snapshot.totalTransferCount > 0 {
-                progress
-            }
-            if model.isWatchingForStuckFiles {
-                WatchBar(model: model)
-            }
-            Picker("View", selection: $model.tab) {
-                Text("Transfers").tag(StatusModel.Tab.transfers)
-                Text("Recent").tag(StatusModel.Tab.recent)
-            }
-            .pickerStyle(.segmented)
-            .labelsHidden()
-
-            Group {
-                switch model.tab {
-                case .transfers: TransferList(model: model)
-                case .recent: RecentList(model: model)
-                }
-            }
-            .frame(height: 300)
-
-            footer
-        }
-        .padding(14)
-        .frame(width: 360)
-        .onAppear {
-            model.dismissPanel = { dismiss() }
-            model.refresh()
-            model.startProgressUpdates()
-        }
-        .onDisappear { model.stopProgressUpdates() }
+    static func preferredHeight(uploads: Int, downloads: Int) -> CGFloat {
+        chromeHeight + CGFloat(min(10, max(1, uploads)) + min(10, max(1, downloads))) * rowHeight
     }
 
-    // MARK: Header
+    static func visibleRows(uploads: Int, downloads: Int, height: CGFloat) -> (Int, Int) {
+        var up = min(10, max(1, uploads))
+        var down = min(10, max(1, downloads))
+        let budget = max(2, Int((height - chromeHeight) / rowHeight))
+        while up + down > budget {
+            if up >= down && up > 1 { up -= 1 }
+            else if down > 1 { down -= 1 }
+        }
+        return (up, down)
+    }
+}
+
+struct StatusPanel: View {
+    let model: StatusModel
+    let onSettings: () -> Void
+    let onClose: () -> Void
+    let onFileInfo: (String) -> Void
+
+    var body: some View {
+        GeometryReader { geometry in
+            let rows = StatusPanelLayout.visibleRows(
+                uploads: model.uploads.fileCount, downloads: model.downloads.fileCount,
+                height: geometry.size.height)
+            VStack(spacing: 0) {
+                header.frame(height: 52)
+                DirectionSection(model: model, direction: .upload, visibleRows: rows.0,
+                                 onClose: onClose, onFileInfo: onFileInfo)
+                Divider()
+                DirectionSection(model: model, direction: .download, visibleRows: rows.1,
+                                 onClose: onClose, onFileInfo: onFileInfo)
+                Spacer(minLength: 0)
+                footer.frame(height: 42)
+            }
+            .padding(12)
+        }
+        .background(.regularMaterial)
+    }
 
     private var header: some View {
-        HStack(spacing: 12) {
-            StatusBadge(model: model)
+        HStack(spacing: 10) {
+            Image(systemName: MenuBarIcon.symbol(for: model.snapshot, isReachable: model.isReachable,
+                                                stuckCount: model.stuckCount).rawValue)
+                .font(.title2)
+                .accessibilityHidden(true)
             VStack(alignment: .leading, spacing: 2) {
-                Text(model.title).font(.headline)
-                // Refresh "Last transfer 3 minutes ago" while the panel stays open.
-                TimelineView(.periodic(from: .now, by: 30)) { _ in
-                    Text(model.detail)
-                        .font(.subheadline)
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
-                }
-            }
-            Spacer(minLength: 0)
-            moreMenu
-        }
-    }
-
-    private var progress: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            ProgressView(value: model.snapshot.progress)
-                .progressViewStyle(.linear)
-            Text(model.progressText)
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .monospacedDigit()
-        }
-    }
-
-    /// A glass button that opens a native menu. SwiftUI's `Menu` ignores
-    /// `.buttonStyle(.glass)` and the label frame, which left bare, small dots.
-    private var moreMenu: some View {
-        MoreButton { anchor in
-            let menu = NSMenu()
-            let watch = ActionMenuItem("Watch for Stuck Files", systemImage: "exclamationmark.triangle") {
-                model.toggleStuckFileWatch()
-            }
-            watch.state = model.isWatchingForStuckFiles ? .on : .off
-            menu.addItem(watch)
-            menu.addItem(.separator())
-            // Watch for Stuck Files shows its result in the panel, so the panel
-            // stays open; the other items open a window or an app and close it.
-            menu.addItem(ActionMenuItem("Open History Log", systemImage: "doc.text") {
-                model.closePanel()
-                model.openLog()
-            })
-            menu.addItem(ActionMenuItem("Clear History…", systemImage: "trash") {
-                model.closePanel()
-                model.clearHistory()
-            })
-            menu.addItem(.separator())
-            menu.addItem(ActionMenuItem("Settings…", systemImage: "gearshape", key: ",") {
-                model.closePanel()
-                NSApp.activate()
-                openSettings()
-            })
-            menu.addItem(ActionMenuItem("About SyncGlass", systemImage: "info.circle") {
-                model.closePanel()
-                model.showAbout()
-            })
-            if Updater.shared.isAvailable {
-                let title = Updater.shared.pendingVersion.map { "Update to \($0)…" } ?? "Check for Updates…"
-                menu.addItem(ActionMenuItem(title, systemImage: "arrow.down.circle") {
-                    model.closePanel()
-                    Updater.shared.checkForUpdates()
-                })
-            }
-            menu.addItem(.separator())
-            menu.addItem(ActionMenuItem("Quit SyncGlass", systemImage: "power", key: "q") {
-                NSApp.terminate(nil)
-            })
-            // Open the menu below the button, right edges aligned.
-            let y = anchor.isFlipped ? anchor.bounds.maxY + 4 : anchor.bounds.minY - 4
-            let x = anchor.bounds.maxX - menu.size.width
-            menu.popUp(positioning: nil, at: NSPoint(x: x, y: y), in: anchor)
-        }
-    }
-
-    // MARK: Footer
-
-    private var footer: some View {
-        HStack(spacing: 8) {
-            Label(model.diskUsage.map { "\($0) on this Mac" } ?? "Calculating size…", systemImage: "internaldrive")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .lineLimit(1)
-            Spacer(minLength: 0)
-            GlassContainer(spacing: 6) {
-                HStack(spacing: 6) {
-                    FooterButton(title: "Open iCloud Drive", systemImage: "folder", model: model) { model.openICloudDrive() }
-                    FooterButton(title: "Open iCloud.com", systemImage: "safari", model: model) { model.openICloudOnline() }
-                    FooterButton(title: "iCloud Settings", systemImage: "icloud", model: model) { model.openICloudSettings() }
-                    FooterButton(title: "SyncGlass Settings", systemImage: "gearshape", model: model) {
-                        NSApp.activate()
-                        openSettings()
-                    }
-                }
-            }
-        }
-    }
-}
-
-private struct MoreButton: View {
-    let showMenu: (NSView) -> Void
-    @State private var anchor = MenuAnchor()
-
-    var body: some View {
-        Button {
-            if let view = anchor.view { showMenu(view) }
-        } label: {
-            Image(systemName: "ellipsis")
-                .font(.system(size: 15, weight: .semibold))
-                .frame(width: 26, height: 26)
-        }
-        .glassCircleButtonStyle()
-        .background(MenuAnchorView(anchor: anchor))
-        .help("More")
-        .accessibilityLabel("More")
-    }
-}
-
-/// Holds the AppKit view behind `MoreButton`, which `NSMenu.popUp` needs for positioning.
-@MainActor
-private final class MenuAnchor {
-    weak var view: NSView?
-}
-
-private struct MenuAnchorView: NSViewRepresentable {
-    let anchor: MenuAnchor
-
-    func makeNSView(context: Context) -> NSView {
-        let view = NSView()
-        anchor.view = view
-        return view
-    }
-
-    func updateNSView(_ nsView: NSView, context: Context) {
-        anchor.view = nsView
-    }
-}
-
-/// An `NSMenuItem` that runs a closure.
-private final class ActionMenuItem: NSMenuItem {
-    private let handler: () -> Void
-
-    init(_ title: String, systemImage: String, key: String = "", handler: @escaping () -> Void) {
-        self.handler = handler
-        super.init(title: title, action: #selector(run), keyEquivalent: key)
-        target = self
-        image = NSImage(systemSymbolName: systemImage, accessibilityDescription: nil)
-    }
-
-    required init(coder: NSCoder) { fatalError("not used") }
-
-    @objc private func run() { handler() }
-}
-
-/// Every footer button opens a window or an app, so it closes the panel first.
-private struct FooterButton: View {
-    let title: String
-    let systemImage: String
-    let model: StatusModel
-    let action: () -> Void
-
-    var body: some View {
-        Button {
-            model.closePanel()
-            action()
-        } label: {
-            Image(systemName: systemImage)
-                .frame(width: 22, height: 22)
-        }
-        .glassCircleButtonStyle()
-        .help(title)
-        .accessibilityLabel(title)
-    }
-}
-
-/// The colored status symbol at the top of the panel. Only the menu-bar icon
-/// must stay monochrome; inside the panel the state can use color.
-private struct StatusBadge: View {
-    let model: StatusModel
-
-    var body: some View {
-        Image(systemName: symbol)
-            .font(.system(size: 20, weight: .medium))
-            .foregroundStyle(tint)
-            .contentTransition(.symbolEffect(.replace))
-            .symbolEffect(.pulse, options: .repeating, isActive: isActive)
-            .frame(width: 40, height: 40)
-            .glassBackground(tint: tint.opacity(0.25), in: .circle)
-            .accessibilityHidden(true)
-    }
-
-    private var isActive: Bool { model.isReachable && model.snapshot.status != .idle }
-
-    private var symbol: String {
-        if !model.isReachable { return "icloud.slash" }
-        switch model.snapshot.status {
-        case .idle: return "checkmark.icloud"
-        case .syncing: return "arrow.clockwise.icloud"
-        case .transferring: return model.snapshot.isDownloadingOnly ? "icloud.and.arrow.down" : "icloud.and.arrow.up"
-        }
-    }
-
-    private var tint: Color {
-        if !model.isReachable { return .secondary }
-        switch model.snapshot.status {
-        case .idle: return .green
-        case .syncing: return .teal
-        case .transferring: return .accentColor
-        }
-    }
-}
-
-/// Shown while Watch for Stuck Files is on: when SyncGlass last read iCloud's
-/// queue and how many files are stuck. The ⋯ menu turns the watch off.
-private struct WatchBar: View {
-    let model: StatusModel
-    @State private var showsInfo = false
-
-    var body: some View {
-        HStack(spacing: 10) {
-            Image(systemName: "exclamationmark.triangle")
-                .foregroundStyle(.orange)
-                .accessibilityHidden(true)
-            VStack(alignment: .leading, spacing: 1) {
-                Text("Watching for stuck files").font(.callout.weight(.medium))
-                // Refresh "Checked 20 sec. ago" while the panel stays open.
-                TimelineView(.periodic(from: .now, by: 10)) { context in
-                    Text(detail(now: context.date))
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .monospacedDigit()
-                }
-            }
-            Spacer(minLength: 4)
-            Button {
-                showsInfo.toggle()
-            } label: {
-                Image(systemName: "info")
-                    .font(.caption.weight(.semibold))
-                    .frame(width: 18, height: 18)
-            }
-            .glassCircleButtonStyle()
-            .controlSize(.small)
-            .help("About Watch for Stuck Files")
-            .accessibilityLabel("About Watch for Stuck Files")
-            .popover(isPresented: $showsInfo, arrowEdge: .bottom) { info }
-        }
-        .padding(.horizontal, 10)
-        .padding(.vertical, 7)
-        .glassBackground(tint: .orange.opacity(0.15), in: .rect(cornerRadius: 12))
-    }
-
-    private var info: some View {
-        let minutes = Int(ICloudQueue.stallTime / 60)
-        return VStack(alignment: .leading, spacing: 8) {
-            Text("Watching for stuck files").font(.headline)
-            Text("Turn this on when you have reason to believe that iCloud Drive is stuck on a file, and off once you know which file it is.")
-            Text("SyncGlass reads iCloud Drive's queue at once and then every minute.")
-            Text("A file is marked stuck when iCloud reports an upload or download error for it, or when it is in iCloud's queue and its upload has not progressed for \(minutes) minutes. So a file without an error appears as stuck only after \(minutes) minutes of watching.")
-            Text("If a file stays stuck, we would like to hear from you. SyncGlass shows which file is stuck, but it names the cause only when iCloud reports an error for the file, as it does when the network connection is missing. Please open an issue on GitHub with the output of brctl status: real cases help us diagnose more kinds of problems.")
-            Link("How to send it", destination: URL(string: "https://github.com/alberti42/SyncGlass#troubleshooting")!)
-            Text("Choose Watch for Stuck Files in the ⋯ menu again to stop.")
-                .foregroundStyle(.secondary)
-        }
-        .font(.callout)
-        .fixedSize(horizontal: false, vertical: true)
-        .frame(width: 300, alignment: .leading)
-        .padding(16)
-    }
-
-    /// "Checked 20 sec. ago · none stuck", with "so far" while the watch has run
-    /// for less than `ICloudQueue.stallTime`.
-    private func detail(now: Date) -> String {
-        guard let last = model.lastStuckFileCheck else { return "Checking…" }
-        let f = RelativeDateTimeFormatter()
-        f.dateTimeStyle = .named   // "now"
-        f.unitsStyle = .short
-        let n = model.stuckCount
-        let early = model.stuckFileWatchStart.map { now.timeIntervalSince($0) < ICloudQueue.stallTime } ?? false
-        let found = n == 0 ? (early ? "none stuck so far" : "none stuck") : "\(n) stuck"
-        return "Checked \(f.localizedString(for: min(last, now), relativeTo: now)) · \(found)"
-    }
-}
-
-// MARK: Lists
-
-private struct TransferList: View {
-    let model: StatusModel
-
-    var body: some View {
-        let paths = model.transfers
-        if paths.isEmpty {
-            ContentUnavailableView("No Transfers", systemImage: "checkmark.icloud",
-                                   description: Text("Files that are uploading or downloading appear here."))
-        } else {
-            ScrollView {
-                LazyVStack(spacing: 2) {
-                    ForEach(paths, id: \.self) { path in
-                        TransferRow(
-                            path: path,
-                            isComplete: model.snapshot.completedTransfers.contains(path),
-                            isDownloading: model.snapshot.downloadingTransfers.contains(path),
-                            progress: model.progress(for: path),
-                            isStuck: model.isStuck(path),
-                            lastAttempt: model.queueItem(for: path)?.operation?.lastAttempt,
-                            error: model.transferError(for: path),
-                            model: model)
-                    }
-                }
-            }
-            .scrollIndicators(.automatic)
-        }
-    }
-}
-
-private struct RecentList: View {
-    let model: StatusModel
-
-    var body: some View {
-        let entries = model.recents
-        if entries.isEmpty {
-            ContentUnavailableView("No Recent Transfers", systemImage: "clock",
-                                   description: Text("Files appear here after they finish transferring."))
-        } else {
-            ScrollView {
-                LazyVStack(spacing: 2) {
-                    ForEach(entries, id: \.path) { entry in
-                        RecentRow(entry: entry, model: model)
-                    }
-                }
-            }
-        }
-    }
-}
-
-/// A file in transfer: icon, name, direction and size, with Stop Tracking,
-/// Get Info and Show in Finder on hover.
-private struct TransferRow: View {
-    let path: String
-    let isComplete: Bool
-    let isDownloading: Bool
-    /// Byte progress from `FileProgressMonitor`; nil when iCloud has not published any.
-    let progress: FileProgress?
-    /// From Watch for Stuck Files (`ICloudQueueMonitor`).
-    let isStuck: Bool
-    let lastAttempt: Date?
-    let error: String?
-    let model: StatusModel
-    @State private var hovering = false
-    @Environment(\.openWindow) private var openWindow
-
-    var body: some View {
-        FileRow(path: path, hovering: hovering) {
-            // Refresh "last attempt 4 min ago" while the panel stays open.
-            TimelineView(.periodic(from: .now, by: 30)) { context in
-                Text(stuckNow ? stuckDetail(now: context.date) : detail).monospacedDigit()
-            }
-        } trailing: {
-            if hovering {
-                HStack(spacing: 4) {
-                    if !isComplete {
-                        RowButton(title: "Stop Tracking", systemImage: "xmark") { model.ignore(path) }
-                    }
-                    RowButton(title: "Get Info", systemImage: "info") {
-                        model.closePanel()
-                        FileInfo.open(path, with: openWindow)
-                    }
-                    RowButton(title: "Show in Finder", systemImage: "magnifyingglass") {
-                        model.closePanel()
-                        model.reveal(path)
-                    }
-                }
-            } else if isComplete {
-                Image(systemName: "checkmark.circle.fill")
-                    .foregroundStyle(.green)
-                    .accessibilityLabel("Complete")
-            } else if stuckNow {
-                Image(systemName: "exclamationmark.triangle.fill")
-                    .foregroundStyle(.orange)
-                    .help(error ?? "No progress for \(Int(ICloudQueue.stallTime / 60)) minutes")
-                    .accessibilityLabel("Stuck")
-            } else if let progress {
-                ProgressView(value: progress.fraction)
-                    .progressViewStyle(.circular)
-                    .controlSize(.small)
-                    .accessibilityLabel("\(downloading ? "Downloading" : "Uploading") \(percent(progress))")
-            } else {
-                Image(systemName: isDownloading ? "arrow.down.circle" : "arrow.up.circle")
-                    .foregroundStyle(.secondary)
-                    .symbolEffect(.pulse, options: .repeating)
-                    .accessibilityLabel(isDownloading ? "Downloading" : "Uploading")
-            }
-        }
-        .onHover { hovering = $0 }
-        .onTapGesture(count: 2) { model.reveal(path) }
-    }
-
-    /// The direction iCloud reports in the progress object wins over the tracker's guess.
-    private var downloading: Bool {
-        switch progress?.direction {
-        case .downloading?: return true
-        case .uploading?: return false
-        case nil: return isDownloading
-        }
-    }
-
-    private var stuckNow: Bool { isStuck && !isComplete }
-
-    /// "Waiting · last attempt 4 min ago"
-    private func stuckDetail(now: Date) -> String {
-        guard let lastAttempt else { return "Waiting" }
-        let f = RelativeDateTimeFormatter()
-        f.dateTimeStyle = .named   // "now", "yesterday"
-        f.unitsStyle = .short
-        return "Waiting · last attempt \(f.localizedString(for: min(lastAttempt, now), relativeTo: now))"
-    }
-
-    private func percent(_ p: FileProgress) -> String {
-        p.fraction.formatted(.percent.precision(.fractionLength(0)))
-    }
-
-    private var detail: String {
-        let state = isComplete ? "Done" : (downloading ? "Downloading" : "Uploading")
-        if !isComplete, let progress, progress.totalBytes > 0 {
-            let total = PathChecks.humanReadable(bytes: Double(progress.totalBytes))
-            return "\(state) · \(percent(progress)) of \(total)"
-        }
-        guard FileManager.default.fileExists(atPath: path) else { return state }
-        let item = ItemState(path: path)
-        let bytes = item.isPackage ? PathChecks.directorySize(path) : item.fileSize
-        return "\(state) · \(PathChecks.humanReadable(bytes: Double(bytes)))"
-    }
-}
-
-/// A recently transferred file: icon, name, and when and how the transfer finished.
-private struct RecentRow: View {
-    let entry: RecentTransfer
-    let model: StatusModel
-    @State private var hovering = false
-    @Environment(\.openWindow) private var openWindow
-
-    var body: some View {
-        FileRow(path: entry.path, hovering: hovering) {
-            // Refresh "3 min ago" while the panel stays open.
-            TimelineView(.periodic(from: .now, by: 30)) { context in
-                Text(detail(now: context.date))
-            }
-        } trailing: {
-            if hovering {
-                HStack(spacing: 4) {
-                    RowButton(title: "Get Info", systemImage: "info") {
-                        model.closePanel()
-                        FileInfo.open(entry.path, with: openWindow)
-                    }
-                    RowButton(title: "Show in Finder", systemImage: "magnifyingglass") {
-                        model.closePanel()
-                        model.reveal(entry.path)
-                    }
-                }
-            }
-        }
-        .onHover { hovering = $0 }
-        .onTapGesture(count: 2) { model.reveal(entry.path) }
-    }
-
-    private func detail(now: Date) -> String {
-        let folder = ((entry.path as NSString).deletingLastPathComponent as NSString).lastPathComponent
-        let location = folder == "com~apple~CloudDocs" ? "iCloud Drive" : folder
-        let f = RelativeDateTimeFormatter()
-        f.dateTimeStyle = .named   // "now", "yesterday"
-        f.unitsStyle = .short
-        return "\(location) · \(entry.kind.verb) \(f.localizedString(for: min(entry.date, now), relativeTo: now))"
-    }
-}
-
-private struct FileRow<Detail: View, Trailing: View>: View {
-    let path: String
-    let hovering: Bool
-    @ViewBuilder let detail: Detail
-    @ViewBuilder let trailing: Trailing
-
-    var body: some View {
-        HStack(spacing: 10) {
-            Image(nsImage: NSWorkspace.shared.icon(forFile: path))
-                .resizable()
-                .frame(width: 30, height: 30)
-                .accessibilityHidden(true)
-            VStack(alignment: .leading, spacing: 1) {
-                Text(FileManager.default.displayName(atPath: path))
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-                detail
+                Text("iCloud Drive").font(.headline)
+                Text(statusText)
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
+                    .help(statusText)
             }
             Spacer(minLength: 4)
-            trailing
+            Menu {
+                Button(model.isWatchingForStuckFiles ? "Stop Watching for Stuck Files" : "Watch for Stuck Files") {
+                    model.toggleStuckFileWatch()
+                }
+                .disabled(model.isPreview)
+                Button("Scan for Transfers…") {
+                    onClose()
+                    Scanner.scanWithPanel()
+                }
+                .disabled(model.isPreview)
+                Divider()
+                Button("About SyncGlass") {
+                    onClose()
+                    model.showAbout()
+                }
+            } label: {
+                Image(systemName: "ellipsis.circle")
+            }
+            .menuStyle(.borderlessButton)
+            .fixedSize()
+            .help("More")
+            .accessibilityLabel("More")
         }
-        .padding(.horizontal, 8)
-        .padding(.vertical, 5)
-        .background(hovering ? AnyShapeStyle(.quaternary) : AnyShapeStyle(.clear),
-                    in: .rect(cornerRadius: 10))
-        .contentShape(.rect(cornerRadius: 10))
-        .help((path as NSString).abbreviatingWithTildeInPath)
+    }
+
+    private var statusText: String {
+        if !model.isReachable { return "Offline — transfer activity may be stale" }
+        if case .unavailable(let reason) = model.snapshot.availability { return "Monitoring unavailable: \(reason)" }
+        if model.isWatchingForStuckFiles {
+            return model.lastStuckFileCheck == nil ? "Checking for stuck files…" : "Watching for stuck files · \(model.stuckCount) stuck"
+        }
+        if model.isPreview { return "Synthetic preview — not live iCloud data" }
+        if model.snapshot.isScanning { return "Scanning for transfers…" }
+        if model.snapshot.items.isEmpty { return "No observed transfers" }
+        return "Current transfers reported by macOS"
+    }
+
+    private var footer: some View {
+        HStack {
+            Button("Settings…") {
+                onClose()
+                onSettings()
+            }
+            .keyboardShortcut(",", modifiers: .command)
+            Spacer()
+            Button("Quit SyncGlass") { NSApp.terminate(nil) }
+                .keyboardShortcut("q", modifiers: .command)
+        }
+        .controlSize(.small)
     }
 }
 
-private struct RowButton: View {
-    let title: String
-    let systemImage: String
-    let action: () -> Void
+private struct DirectionSection: View {
+    let model: StatusModel
+    let direction: TransferDirection
+    let visibleRows: Int
+    let onClose: () -> Void
+    let onFileInfo: (String) -> Void
+
+    private var summary: DirectionSummary { model.summary(for: direction) }
 
     var body: some View {
-        Button(action: action) {
-            Image(systemName: systemImage)
-                .font(.caption.weight(.semibold))
-                .frame(width: 18, height: 18)
+        VStack(spacing: 0) {
+            VStack(alignment: .leading, spacing: 4) {
+                HStack {
+                    Label(direction.title, systemImage: direction == .upload ? "arrow.up" : "arrow.down")
+                        .font(.headline)
+                    Spacer()
+                    Text("\(summary.fileCount) total files")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                Text(summary.byteText)
+                    .font(.caption)
+                    .monospacedDigit()
+                    .lineLimit(1)
+                    .help(summary.byteText)
+                Text(summary.availabilityText ?? " ")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .help(summary.availabilityText ?? "")
+                if let fraction = summary.fraction {
+                    ProgressView(value: fraction)
+                        .progressViewStyle(.linear)
+                        .accessibilityLabel("\(direction.title) byte progress")
+                } else {
+                    // An unknown total is not a determinate zero or an animated spinner.
+                    Capsule().fill(.quaternary).frame(height: 4)
+                        .accessibilityLabel("\(direction.title) byte total unavailable")
+                }
+            }
+            .frame(height: 80)
+            if summary.items.isEmpty {
+                Text(direction == .upload ? "No uploads observed" : "No downloads observed")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity)
+                    .frame(height: StatusPanelLayout.rowHeight)
+            } else {
+                ScrollView(.vertical) {
+                    LazyVStack(spacing: 0) {
+                        ForEach(summary.items) { item in
+                            TransferRow(item: item, direction: direction, model: model,
+                                        onClose: onClose, onFileInfo: onFileInfo)
+                        }
+                    }
+                }
+                .scrollIndicators(.automatic)
+                .frame(height: CGFloat(visibleRows) * StatusPanelLayout.rowHeight)
+            }
         }
-        .glassCircleButtonStyle()
-        .controlSize(.small)
-        .help(title)
-        .accessibilityLabel(title)
+    }
+}
+
+private struct TransferRow: View {
+    let item: TransferItem
+    let direction: TransferDirection
+    let model: StatusModel
+    let onClose: () -> Void
+    let onFileInfo: (String) -> Void
+    private let filename: String
+    private let parentName: String
+
+    init(item: TransferItem, direction: TransferDirection, model: StatusModel,
+         onClose: @escaping () -> Void, onFileInfo: @escaping (String) -> Void) {
+        self.item = item
+        self.direction = direction
+        self.model = model
+        self.onClose = onClose
+        self.onFileInfo = onFileInfo
+        filename = (item.path as NSString).lastPathComponent
+        parentName = ((item.path as NSString).deletingLastPathComponent as NSString).lastPathComponent
+    }
+
+    var body: some View {
+        GeometryReader { geometry in
+            HStack(spacing: 8) {
+                Text(parentName)
+                    .foregroundStyle(.secondary)
+                    .frame(width: max(56, (geometry.size.width - 100) * 0.3), alignment: .leading)
+                Text(filename)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                Text(progressText)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .monospacedDigit()
+                    .frame(width: 76, alignment: .trailing)
+            }
+            .font(.callout)
+            .lineLimit(1)
+            .truncationMode(.head)
+            .padding(.horizontal, 4)
+            .frame(height: StatusPanelLayout.rowHeight)
+            .contentShape(Rectangle())
+            .help(helpText)
+            .contextMenu {
+                Button("Show in Finder") {
+                    onClose()
+                    model.reveal(item.path)
+                }
+                .disabled(model.isPreview)
+                Button("Get Info") {
+                    onClose()
+                    onFileInfo(item.path)
+                }
+                .disabled(model.isPreview)
+            }
+            .onTapGesture(count: 2) {
+                guard !model.isPreview else { return }
+                onClose()
+                model.reveal(item.path)
+            }
+        }
+        .frame(height: StatusPanelLayout.rowHeight)
+        .onScrollVisibilityChange(threshold: 0.01) { visible in
+            model.setVisible(item.path, direction: direction, visible: visible)
+        }
+        .onDisappear { model.setVisible(item.path, direction: direction, visible: false) }
+        .accessibilityElement(children: .combine)
+    }
+
+    private var helpText: String {
+        let error = item.error ?? model.transferError(for: item.path)
+        return error.map { "\(item.path)\n\($0)" } ?? item.path
+    }
+
+    private var progressText: String {
+        if item.error != nil || model.transferError(for: item.path) != nil { return "Error" }
+        if model.isStuck(item.path) { return "Stuck" }
+        if direction == .upload && item.waitingUpload && !item.active.contains(.upload) { return "Waiting" }
+        guard let progress = model.progress(for: item.path, direction: direction) else { return "Unknown" }
+        return progress.fraction.formatted(.percent.precision(.fractionLength(0)))
     }
 }

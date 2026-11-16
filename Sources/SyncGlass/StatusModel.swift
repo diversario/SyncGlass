@@ -1,263 +1,155 @@
 import AppKit
 import Observation
 
-/// State shared by the menu-bar icon and the panel.
+/// Shared state for the status item and its panel.
 @MainActor
 @Observable
 final class StatusModel {
-    enum Tab: Hashable { case transfers, recent }
-
     private(set) var snapshot = TrackerSnapshot()
     private(set) var isReachable = true
-    var tab: Tab = .recent
-    private(set) var diskUsage: String? = Prefs.store.string(forKey: PrefKey.iCloudDiskUsage)
-    private(set) var showsProgressInMenuBar = Prefs.statusItemMode == .progressWheel
-
-    /// Byte progress of the files in transfer, keyed by path.
+    private(set) var uploads = DirectionSummary(items: [], direction: .upload, progress: [:])
+    private(set) var downloads = DirectionSummary(items: [], direction: .download, progress: [:])
     private(set) var fileProgress: [String: FileProgress] = [:]
-    @ObservationIgnored var fileProgressMonitor: FileProgressMonitor?
+    private(set) var panelIsOpen = false
+    var isPreview = false
+
+    @ObservationIgnored let fileProgressMonitor = FileProgressMonitor()
+    @ObservationIgnored var onChange: (() -> Void)?
     @ObservationIgnored private var progressTask: Task<Void, Never>?
+    @ObservationIgnored private var visibleUploads = Set<String>()
+    @ObservationIgnored private var visibleDownloads = Set<String>()
+    @ObservationIgnored private var conflicts = Set<String>()
+    @ObservationIgnored private var itemsByPath: [String: TransferItem] = [:]
 
-    @ObservationIgnored private var hadTransfers = false
-    /// Set by the debug preview so sample data is not replaced on appear.
-    @ObservationIgnored var isPreview = false
-    /// The panel's `DismissAction`, set by `StatusPanel` when it appears.
-    @ObservationIgnored var dismissPanel: (() -> Void)?
-    @ObservationIgnored private var diskUsageTask: Task<Void, Never>?
-
-    var menuBarImage: NSImage {
-        MenuBarIcon.image(for: snapshot, isReachable: isReachable, showsProgress: showsProgressInMenuBar,
-                          stuckCount: stuckCount)
-    }
-
-    /// Switch to Transfers when transfers start and back to Recent when they end.
     func update(_ snapshot: TrackerSnapshot) {
+        guard self.snapshot != snapshot else { return }
         self.snapshot = snapshot
-        let hasTransfers = snapshot.transferCount > 0
-        if hasTransfers != hadTransfers { tab = hasTransfers ? .transfers : .recent }
-        hadTransfers = hasTransfers
+        itemsByPath = Dictionary(uniqueKeysWithValues: snapshot.items.map { ($0.path, $0) })
+        fileProgress = fileProgress.filter { itemsByPath[$0.key] != nil }
+        uploads = DirectionSummary(items: snapshot.items, direction: .upload, progress: fileProgress)
+        downloads = DirectionSummary(items: snapshot.items, direction: .download, progress: fileProgress)
+        reconcileProgress()
+        onChange?()
     }
 
-    func setReachable(_ reachable: Bool) { isReachable = reachable }
-
-    func preferencesChanged() {
-        showsProgressInMenuBar = Prefs.statusItemMode == .progressWheel
+    func setReachable(_ reachable: Bool) {
+        guard isReachable != reachable else { return }
+        isReachable = reachable
+        onChange?()
     }
 
-    func folderChanged() {
-        Prefs.store.removeObject(forKey: PrefKey.iCloudDiskUsage)
-        diskUsage = nil
+    func summary(for direction: TransferDirection) -> DirectionSummary {
+        direction == .upload ? uploads : downloads
     }
 
-    /// Called when the panel opens.
-    func refresh() {
-        guard !isPreview, let tracker = Tracker.shared else { return }
-        tracker.cleanRecentTransfers()
-        update(tracker.snapshot())
-        updateDiskUsage()
+    func progress(for path: String, direction: TransferDirection) -> FileProgress? {
+        guard let progress = fileProgress[path],
+              let item = itemsByPath[path],
+              progress.matches(item, direction: direction) else { return nil }
+        return progress
     }
 
-    // MARK: Per-file progress
-
-    func progress(for path: String) -> FileProgress? {
-        fileProgress[path]
+    func openPanel() {
+        guard !panelIsOpen else { return }
+        panelIsOpen = true
+        if !isPreview, let tracker = Tracker.shared { update(tracker.snapshot()) }
+        reconcileProgress()
     }
 
-    /// Read per-file progress twice a second while the panel is open.
-    func startProgressUpdates() {
-        progressTask?.cancel()
-        progressTask = Task { [weak self] in
-            while !Task.isCancelled {
-                guard let self else { return }
-                let latest = self.fileProgressMonitor?.progressByPath() ?? [:]
-                if latest != self.fileProgress { self.fileProgress = latest }
-                try? await Task.sleep(for: .milliseconds(500))
-            }
-        }
-    }
-
-    func stopProgressUpdates() {
+    func closePanel() {
+        panelIsOpen = false
         progressTask?.cancel()
         progressTask = nil
+        fileProgressMonitor.track([String]())
+        visibleUploads.removeAll()
+        visibleDownloads.removeAll()
+        conflicts.removeAll()
+        if !isPreview {
+            fileProgress.removeAll()
+            updateByteSummaries()
+        }
     }
 
-    // MARK: Stuck files
+    func setVisible(_ path: String, direction: TransferDirection, visible: Bool) {
+        let changed: Bool
+        if direction == .upload {
+            changed = visible ? visibleUploads.insert(path).inserted : visibleUploads.remove(path) != nil
+        } else {
+            changed = visible ? visibleDownloads.insert(path).inserted : visibleDownloads.remove(path) != nil
+        }
+        if changed { updateSubscriptions() }
+    }
+
+    func setPreviewProgress(_ progress: [String: FileProgress]) {
+        guard isPreview else { return }
+        fileProgress = progress
+        updateByteSummaries()
+    }
+
+    private func reconcileProgress() {
+        guard panelIsOpen, !isPreview else { return }
+        updateSubscriptions()
+        if snapshot.items.isEmpty {
+            progressTask?.cancel()
+            progressTask = nil
+            return
+        }
+        guard progressTask == nil else { return }
+        progressTask = Task { [weak self] in
+            while !Task.isCancelled {
+                self?.refreshProgress()
+                do { try await Task.sleep(for: .milliseconds(500)) } catch { return }
+            }
+        }
+    }
+
+    private func updateSubscriptions() {
+        guard panelIsOpen, !isPreview else { return }
+        let visible = visibleUploads.union(visibleDownloads)
+        let priority = snapshot.items.filter { visible.contains($0.path) }.map(\.path)
+        let remaining = snapshot.items.filter { !visible.contains($0.path) }.map(\.path)
+        fileProgressMonitor.track(priority + remaining)
+    }
+
+    private func refreshProgress() {
+        let latest = fileProgressMonitor.progressByPath()
+        var mismatched = Set<String>()
+        for item in snapshot.items {
+            guard let direction = latest[item.path]?.direction else { continue }
+            let flag: TransferDirections = direction == .uploading ? .upload : .download
+            if !item.active.contains(flag) { mismatched.insert(item.path) }
+        }
+        let fresh = mismatched.subtracting(conflicts)
+        conflicts = mismatched
+        if !fresh.isEmpty { Tracker.shared?.queuePaths(Array(fresh)) }
+        guard latest != fileProgress else { return }
+        fileProgress = latest
+        updateByteSummaries()
+    }
+
+    private func updateByteSummaries() {
+        uploads.updateProgress(direction: .upload, progress: fileProgress)
+        downloads.updateProgress(direction: .download, progress: fileProgress)
+    }
 
     var isWatchingForStuckFiles: Bool { ICloudQueueMonitor.shared.isWatching }
+    var stuckCount: Int { ICloudQueueMonitor.shared.stuck.count }
+    var lastStuckFileCheck: Date? { ICloudQueueMonitor.shared.lastCheck }
+    func isStuck(_ path: String) -> Bool { ICloudQueueMonitor.shared.stuck.contains(path) }
+    func transferError(for path: String) -> String? {
+        itemsByPath[path]?.error ?? ICloudQueueMonitor.shared.errors[path]
+    }
 
     func toggleStuckFileWatch() {
+        guard !isPreview else { return }
         let monitor = ICloudQueueMonitor.shared
-        if monitor.isWatching {
-            monitor.stop()
-        } else if let fileProgressMonitor {
-            monitor.start(progress: fileProgressMonitor)
-            tab = .transfers
-        }
+        if monitor.isWatching { monitor.stop() } else { monitor.start(progress: fileProgressMonitor) }
+        onChange?()
     }
-
-    func isStuck(_ path: String) -> Bool { ICloudQueueMonitor.shared.stuck.contains(path) }
-
-    var stuckCount: Int { ICloudQueueMonitor.shared.stuck.count }
-
-    var lastStuckFileCheck: Date? { ICloudQueueMonitor.shared.lastCheck }
-
-    var stuckFileWatchStart: Date? { ICloudQueueMonitor.shared.startDate }
-
-    func queueItem(for path: String) -> QueueItem? { ICloudQueueMonitor.shared.items[path] }
-
-    func transferError(for path: String) -> String? { ICloudQueueMonitor.shared.errors[path] }
-
-    // MARK: Lists
-
-    var transfers: [String] {
-        guard !snapshot.isFinishedTransferring else { return [] }
-        // Stuck files first, then by name without extension, in Finder order.
-        let stuck = ICloudQueueMonitor.shared.stuck
-        return snapshot.totalTransfers.sorted {
-            if stuck.contains($0) != stuck.contains($1) { return stuck.contains($0) }
-            let a = (($0 as NSString).lastPathComponent as NSString).deletingPathExtension
-            let b = (($1 as NSString).lastPathComponent as NSString).deletingPathExtension
-            return a.localizedStandardCompare(b) == .orderedAscending
-        }
-    }
-
-    var recents: [RecentTransfer] {
-        snapshot.recentTransfers.filter { FileManager.default.fileExists(atPath: $0.path) }
-    }
-
-    // MARK: Text
-
-    var title: String {
-        guard isReachable else { return "Offline" }
-        switch snapshot.status {
-        case .idle: return "Up to Date"
-        case .syncing: return "Syncing"
-        case .transferring: return snapshot.isDownloadingOnly ? "Downloading" : "Uploading"
-        }
-    }
-
-    var detail: String {
-        guard isReachable else { return "Transfers resume when the network is back." }
-        return Self.detailText(for: snapshot)
-    }
-
-    static func detailText(for s: TrackerSnapshot) -> String {
-        switch s.status {
-        case .syncing:
-            return s.completedDownloadCount == 1
-                ? "Syncing changes to 1 file…"
-                : "Syncing changes to \(s.completedDownloadCount) files…"
-        case .transferring:
-            let noun = s.transferCount == 1 ? "file" : "files"
-            return "\(s.transferCount) \(noun) in progress"
-        case .idle:
-            if let last = Prefs.store.object(forKey: PrefKey.lastTransferDate) as? Date {
-                let f = RelativeDateTimeFormatter()
-                f.dateTimeStyle = .named   // "now", "yesterday"
-                f.unitsStyle = .full
-                return "Last transfer \(f.localizedString(for: min(last, Date()), relativeTo: Date()))"
-            }
-            return "No files are being transferred."
-        }
-    }
-
-    var progressText: String {
-        "\(snapshot.completedTransferCount) of \(snapshot.totalTransferCount) complete"
-    }
-
-    // MARK: Disk usage
-
-    /// `updateICloudDiskUsage`: runs `du -sh` on the folder and keeps the first column.
-    func updateDiskUsage() {
-        diskUsageTask?.cancel()
-        let folder = Prefs.folder
-        diskUsageTask = Task { [weak self] in
-            let size = await Task.detached(priority: .utility) { Self.measureDiskUsage(of: folder) }.value
-            guard let size, !Task.isCancelled else { return }
-            let shown = Self.formatDiskUsage(size)
-            Prefs.store.set(shown, forKey: PrefKey.iCloudDiskUsage)
-            self?.diskUsage = shown
-        }
-    }
-
-    /// du prints "12G"; show "12 GB".
-    nonisolated static func formatDiskUsage(_ size: String) -> String {
-        let unit = size.last ?? "B"
-        return String(size.dropLast()) + " " + String(unit) + (unit == "B" ? "" : "B")
-    }
-
-    /// The first column of `du -sh`, such as "12G".
-    nonisolated private static func measureDiskUsage(of folder: String) -> String? {
-        let p = Process()
-        p.executableURL = URL(fileURLWithPath: "/usr/bin/du")
-        p.arguments = ["-sh", folder]
-        let pipe = Pipe()
-        p.standardOutput = pipe
-        p.standardError = FileHandle.nullDevice
-        guard (try? p.run()) != nil else { return nil }
-        let data = pipe.fileHandleForReading.readDataToEndOfFile()
-        p.waitUntilExit()
-        return String(decoding: data, as: UTF8.self)
-            .split(whereSeparator: \.isWhitespace).first.map(String.init)
-    }
-
-    // MARK: Actions
 
     func reveal(_ path: String) {
-        NSWorkspace.shared.selectFile(path, inFileViewerRootedAtPath: "")
-    }
-
-    /// Stop Tracking: the file keeps syncing but is no longer tracked.
-    func ignore(_ path: String) {
-        Tracker.shared.removeTransfers([path])
-        update(Tracker.shared.snapshot())
-    }
-
-    /// Opens System Settings > [Apple Account] > iCloud. The scene follows `?`;
-    /// with `:` System Settings opens without selecting a page.
-    func openICloudSettings() {
-        if let url = URL(string: "x-apple.systempreferences:com.apple.systempreferences.AppleIDSettings?icloud") {
-            NSWorkspace.shared.open(url)
-        }
-    }
-
-    func openICloudDrive() {
-        NSWorkspace.shared.open(URL(fileURLWithPath: Paths.iCloudDrive))
-    }
-
-    func openICloudOnline() {
-        NSWorkspace.shared.open(URL(string: "https://www.icloud.com/iclouddrive")!)
-    }
-
-    func openLog() {
-        let console = URL(fileURLWithPath: "/System/Applications/Utilities/Console.app")
-        NSWorkspace.shared.open([Paths.historyLog], withApplicationAt: console,
-                                configuration: NSWorkspace.OpenConfiguration())
-    }
-
-    func clearHistory() {
-        let alert = NSAlert()
-        alert.messageText = "Clear the transfer history?"
-        alert.informativeText = "The history log and the list of recent files are deleted. This cannot be undone."
-        alert.addButton(withTitle: "Clear History")
-        alert.addButton(withTitle: "Cancel")
-        alert.buttons.first?.hasDestructiveAction = true
-        NSApp.activate()
-        guard alert.runModal() == .alertFirstButtonReturn else { return }
-        Tracker.shared.clearHistory()
-        update(Tracker.shared.snapshot())
-    }
-
-    /// Closes the panel. Buttons that open a window or another app call this
-    /// first; the panel would otherwise stay in front of the new window.
-    /// The `--preview` panel is an ordinary window and stays open.
-    ///
-    /// Uses SwiftUI's dismiss action. Closing the menu-bar extra's window
-    /// directly leaves SwiftUI believing the panel is open, and the next click
-    /// on the icon does nothing (tested on macOS 27).
-    func closePanel() {
         guard !isPreview else { return }
-        dismissPanel?()
+        NSWorkspace.shared.selectFile(path, inFileViewerRootedAtPath: "")
     }
 
     func showAbout() {

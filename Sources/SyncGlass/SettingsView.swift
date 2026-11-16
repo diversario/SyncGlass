@@ -11,8 +11,6 @@ struct SettingsView: View {
         TabView {
             Tab("General", systemImage: "gearshape") { GeneralPane().fittingHeight() }
             Tab("Monitoring", systemImage: "eye") { MonitoringPane().fittingHeight() }
-            Tab("Notifications", systemImage: "bell.badge") { NotificationsPane().fittingHeight() }
-            Tab("History", systemImage: "clock.arrow.circlepath") { HistoryPane().fittingHeight() }
             Tab("Filters", systemImage: "line.3.horizontal.decrease") { FiltersPane().frame(width: 520, height: 520) }
         }
     }
@@ -28,20 +26,9 @@ private extension View {
 // MARK: General
 
 private struct GeneralPane: View {
-    @AppStorage(PrefKey.statusItemMode) private var statusMode = StatusItemMode.image.rawValue
-
     var body: some View {
         Form {
-            Section("Menu Bar") {
-                Toggle("Show transfer progress in the icon", isOn: Binding(
-                    get: { statusMode == StatusItemMode.progressWheel.rawValue },
-                    set: { statusMode = ($0 ? StatusItemMode.progressWheel : .image).rawValue }
-                ))
-            }
-
             LoginItemSection()
-
-            UpdatesSection()
         }
         .formStyle(.grouped)
     }
@@ -84,28 +71,6 @@ private struct LoginItemSection: View {
         }
         .onAppear { status = LoginItem.status }
         .onChange(of: scenePhase) { _, _ in status = LoginItem.status }
-    }
-}
-
-/// Sparkle's update settings (`Updater`).
-private struct UpdatesSection: View {
-    @Bindable private var updater = Updater.shared
-
-    var body: some View {
-        Section {
-            Toggle("Check for updates automatically", isOn: $updater.automaticallyChecks)
-            Button("Check Now") { updater.checkForUpdates() }
-                .disabled(!updater.canCheckForUpdates)
-        } header: {
-            Text("Updates")
-        } footer: {
-            Text(updater.isAvailable
-                ? "SyncGlass checks once a week."
-                : "Updates are only available in SyncGlass.app.")
-                .foregroundStyle(.secondary)
-                .formFooter()
-        }
-        .disabled(!updater.isAvailable)
     }
 }
 
@@ -153,7 +118,7 @@ private struct MonitoringPane: View {
             Section {
                 Button("Scan for Transfers…") { Scanner.scanWithPanel() }
             } footer: {
-                Text("SyncGlass lists uploads and downloads even when they started before SyncGlass opened: it remembers the files in transfer when it quits, and macOS tells it which files changed while it was not running (the same record of changed files that Time Machine uses). If you think a large upload or download that started before SyncGlass opened is missing from the list, Scan for Transfers checks every file in the folder again and lists the ones that iCloud is still uploading or downloading. The scan takes longer the more files the folder holds.")
+                Text("SyncGlass scans the watched folders when monitoring starts and remembers files still in transfer when it quits. Scan for Transfers checks those folders again for current uploads and downloads without downloading file contents.")
                     .foregroundStyle(.secondary)
                     .formFooter()
             }
@@ -167,118 +132,6 @@ private struct MonitoringPane: View {
         case Paths.mobileDocuments: return "All iCloud Documents"
         default: return (folder as NSString).abbreviatingWithTildeInPath
         }
-    }
-}
-
-// MARK: Notifications
-
-private struct NotificationsPane: View {
-    @AppStorage(PrefKey.showNotifications) private var showNotifications = true
-    @AppStorage(PrefKey.elapsedTimeNotificationLimit) private var elapsedLimit = 30
-    @AppStorage(PrefKey.showDownloadNotifications) private var showDownloadNotifications = true
-    @AppStorage(PrefKey.trackIncomingDownloads) private var trackDownloads = true
-    @AppStorage(PrefKey.downloadBatchDelay) private var downloadBatchDelay = 15
-    @AppStorage(PrefKey.notificationSound) private var sound = "Default"
-
-    var body: some View {
-        Form {
-            Section {
-                Toggle("Notify when uploads finish", isOn: $showNotifications)
-                Stepper(value: $elapsedLimit, in: 0...3600, step: 5) {
-                    LabeledContent("Only after transfers longer than", value: "\(elapsedLimit) s")
-                }
-                .disabled(!showNotifications)
-            } header: {
-                Text("Uploads")
-            } footer: {
-                Text("Short transfers finish without a notification.")
-                    .foregroundStyle(.secondary)
-                    .formFooter()
-            }
-
-            Section {
-                Toggle("Notify when downloads finish", isOn: $showDownloadNotifications)
-                Stepper(value: $downloadBatchDelay, in: 1...300) {
-                    LabeledContent("Group downloads arriving within", value: "\(downloadBatchDelay) s")
-                }
-            } header: {
-                Text("Downloads")
-            }
-            .disabled(!trackDownloads)
-
-            Section("Sound") {
-                Picker("Notification sound", selection: $sound) {
-                    Text("Default").tag("Default")
-                    Text("None").tag("None")
-                    Divider()
-                    ForEach(Notifier.systemSounds, id: \.self) { Text($0).tag($0) }
-                }
-                .onChange(of: sound) { _, name in NSSound(named: name)?.play() }
-                Button("Open Notification Settings…") {
-                    // `?id=` selects this app's page in System Settings > Notifications.
-                    let id = Bundle.main.bundleIdentifier.map { "?id=\($0)" } ?? ""
-                    if let url = URL(string: "x-apple.systempreferences:com.apple.Notifications-Settings.extension\(id)") {
-                        NSWorkspace.shared.open(url)
-                    }
-                }
-            }
-        }
-        .formStyle(.grouped)
-    }
-}
-
-// MARK: History
-
-private struct HistoryPane: View {
-    @AppStorage(PrefKey.enableLogging) private var enableLogging = true
-    @AppStorage(PrefKey.downloadErrorLogging) private var keepDownloadHistory = true
-    @AppStorage(PrefKey.clearLogAfterSize) private var clearLogAfter = 25
-    @AppStorage(PrefKey.recentFilesLimit) private var recentLimit = 100
-
-    var body: some View {
-        Form {
-            Section {
-                Toggle("Keep a history log", isOn: $enableLogging)
-                Toggle("Include downloads", isOn: $keepDownloadHistory)
-                    .disabled(!enableLogging)
-                Stepper(value: $clearLogAfter, in: 1...1000) {
-                    LabeledContent("Clear the log when it reaches", value: "\(clearLogAfter) MB")
-                }
-                .disabled(!enableLogging)
-            } header: {
-                Text("History Log")
-            } footer: {
-                Text((Paths.historyLog.path as NSString).abbreviatingWithTildeInPath)
-                    .foregroundStyle(.secondary)
-                    .textSelection(.enabled)
-                    .formFooter()
-            }
-
-            Section("Recent Files") {
-                Stepper(value: $recentLimit, in: 10...1000, step: 10) {
-                    LabeledContent("Remember up to", value: "\(recentLimit) files")
-                }
-            }
-
-            Section {
-                HStack {
-                    Button("Show Log in Finder") {
-                        NSWorkspace.shared.activateFileViewerSelecting([Paths.historyLog])
-                    }
-                    Spacer()
-                    Button("Clear History…", role: .destructive) {
-                        let alert = NSAlert()
-                        alert.messageText = "Clear the transfer history?"
-                        alert.informativeText = "The history log and the list of recent files are deleted. This cannot be undone."
-                        alert.addButton(withTitle: "Clear History")
-                        alert.addButton(withTitle: "Cancel")
-                        alert.buttons.first?.hasDestructiveAction = true
-                        if alert.runModal() == .alertFirstButtonReturn { Tracker.shared?.clearHistory() }
-                    }
-                }
-            }
-        }
-        .formStyle(.grouped)
     }
 }
 

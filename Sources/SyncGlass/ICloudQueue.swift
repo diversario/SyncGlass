@@ -237,9 +237,8 @@ final class ICloudQueueMonitor {
 
         guard let tracker = Tracker.shared else { return }
         let snapshot = tracker.snapshot()
-        tracker.queuePaths(byPath.keys.filter { !snapshot.totalTransfers.contains($0) })
-
-        let inFlight = Set(snapshot.totalTransfers).subtracting(snapshot.completedTransfers)
+        let inFlight = Set(snapshot.items.map(\.path))
+        tracker.queuePaths(byPath.keys.filter { !inFlight.contains($0) })
         let bytes = progress.progressByPath()
         var stuckNow = Set<String>()
         var errorsNow: [String: String] = [:]

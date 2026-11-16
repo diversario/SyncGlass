@@ -1,77 +1,56 @@
 import AppKit
 
-/// Renders the menu-bar icon.
-///
-/// Every image is a template image: the menu bar draws it in its own foreground
-/// color, so the icon is monochrome and follows light mode, dark mode, tinted
-/// wallpapers and the highlighted state. Shades come from alpha only.
+/// Cached template symbols. Byte updates never repaint the menu bar.
 @MainActor
 enum MenuBarIcon {
-    enum Symbol: String {
+    enum Symbol: String, CaseIterable {
         case idle = "icloud"
         case uploading = "icloud.and.arrow.up"
         case downloading = "icloud.and.arrow.down"
-        case syncing = "arrow.clockwise.icloud"
+        case both = "arrow.up.arrow.down"
         case offline = "icloud.slash"
-        /// Watch for Stuck Files found a stuck file.
-        case stuck = "exclamationmark.icloud"
+        case unavailable = "exclamationmark.icloud"
+        case stuck = "exclamationmark.triangle"
     }
 
-    private static let configuration = NSImage.SymbolConfiguration(pointSize: 15, weight: .medium)
+    private static let images: [Symbol: NSImage] = {
+        let configuration = NSImage.SymbolConfiguration(pointSize: 15, weight: .medium)
+        return Dictionary(uniqueKeysWithValues: Symbol.allCases.map { symbol in
+            let image = NSImage(systemSymbolName: symbol.rawValue, accessibilityDescription: nil)!
+                .withSymbolConfiguration(configuration)!
+            image.isTemplate = true
+            return (symbol, image)
+        })
+    }()
 
-    /// Offline wins over stuck: it explains why transfers stall.
     static func symbol(for snapshot: TrackerSnapshot, isReachable: Bool, stuckCount: Int = 0) -> Symbol {
         guard isReachable else { return .offline }
-        if stuckCount > 0 { return .stuck }
-        switch snapshot.status {
-        case .idle: return .idle
-        case .syncing: return .syncing
-        case .transferring: return snapshot.isDownloadingOnly ? .downloading : .uploading
-        }
+        if case .unavailable = snapshot.availability { return .unavailable }
+        let directions = snapshot.activeDirections
+        if directions.contains([.upload, .download]) { return .both }
+        if directions.contains(.upload) { return .uploading }
+        if directions.contains(.download) { return .downloading }
+        return stuckCount > 0 ? .stuck : .idle
     }
 
-    static func image(for snapshot: TrackerSnapshot, isReachable: Bool, showsProgress: Bool,
-                      stuckCount: Int = 0) -> NSImage {
-        let symbol = symbol(for: snapshot, isReachable: isReachable, stuckCount: stuckCount)
-        let image: NSImage
-        if showsProgress && symbol != .stuck && isReachable && snapshot.status == .transferring
-            && snapshot.totalTransferCount > 1
-        {
-            image = progressImage(progress: snapshot.progress)
-        } else {
-            image = symbolImage(symbol.rawValue)
-        }
-        image.isTemplate = true
-        image.accessibilityDescription = accessibilityLabel(for: snapshot, isReachable: isReachable,
-                                                            stuckCount: stuckCount)
-        return image
+    static func image(for snapshot: TrackerSnapshot, isReachable: Bool, stuckCount: Int = 0) -> NSImage {
+        images[symbol(for: snapshot, isReachable: isReachable, stuckCount: stuckCount)]!
     }
 
     static func accessibilityLabel(for snapshot: TrackerSnapshot, isReachable: Bool, stuckCount: Int = 0) -> String {
-        guard isReachable else { return "SyncGlass: offline" }
-        if stuckCount > 0 { return "SyncGlass: \(stuckCount) stuck \(stuckCount == 1 ? "file" : "files")" }
-        return "SyncGlass: \(StatusModel.detailText(for: snapshot))"
-    }
-
-    private static func symbolImage(_ name: String) -> NSImage {
-        let image = NSImage(systemSymbolName: name, accessibilityDescription: nil)?
-            .withSymbolConfiguration(configuration) ?? NSImage()
-        return image
-    }
-
-    /// A cloud outline that fills from left to right as transfers complete.
-    private static func progressImage(progress: Double) -> NSImage {
-        let outline = symbolImage("icloud")
-        let filled = symbolImage("icloud.fill")
-        let size = outline.size
-        return NSImage(size: size, flipped: false) { rect in
-            outline.draw(in: rect)
-            let clip = NSRect(x: rect.minX, y: rect.minY, width: rect.width * progress, height: rect.height)
-            NSGraphicsContext.saveGraphicsState()
-            clip.clip()
-            filled.draw(in: rect)
-            NSGraphicsContext.restoreGraphicsState()
-            return true
+        var states: [String] = []
+        if !isReachable { states.append("offline") }
+        if case .unavailable(let reason) = snapshot.availability {
+            states.append("monitoring unavailable: \(reason)")
         }
+        let directions = snapshot.activeDirections
+        if directions.contains(.upload) { states.append("uploading") }
+        if directions.contains(.download) { states.append("downloading") }
+        let waiting = snapshot.items.filter { $0.waitingUpload && !$0.active.contains(.upload) }.count
+        if waiting > 0 { states.append("\(waiting) waiting to upload") }
+        if snapshot.isScanning { states.append("scanning for transfers") }
+        if stuckCount > 0 { states.append("\(stuckCount) stuck \(stuckCount == 1 ? "file" : "files")") }
+        if states.isEmpty { states.append("no observed transfers") }
+        return "SyncGlass: " + states.joined(separator: "; ")
     }
 }

@@ -1,17 +1,6 @@
 import AppKit
 import SwiftUI
 
-/// The "File Info" window: everything macOS exposes about one iCloud file, plus
-/// what SyncGlass recorded about its transfers.
-enum FileInfo {
-    static let windowID = "file-info"
-
-    @MainActor
-    static func open(_ path: String, with openWindow: OpenWindowAction) {
-        NSApp.activate()
-        openWindow(id: windowID, value: path)
-    }
-}
 
 /// One reading of a file's metadata. Dates and iCloud state come from URL
 /// resource values; the last-opened date comes from Spotlight.
@@ -127,7 +116,6 @@ final class FileInfoModel {
     let path: String
     private(set) var details: FileDetails
     private(set) var progress: FileProgress?
-    private(set) var recorded: RecentTransfer?
     private(set) var isTracked = false
     /// From Watch for Stuck Files; nil while it is off.
     private(set) var queue: (item: QueueItem?, isStuck: Bool)?
@@ -154,16 +142,13 @@ final class FileInfoModel {
     func stop() {
         task?.cancel()
         task = nil
-        monitor.track([])
+        monitor.track([String]())
     }
 
     private func reload() {
         details = FileDetails(path: path)
         progress = monitor.progressByPath()[path]
-        if let snapshot = Tracker.shared?.snapshot() {
-            recorded = snapshot.recentTransfers.first { $0.path == path }
-            isTracked = snapshot.totalTransfers.contains(path) && !snapshot.completedTransfers.contains(path)
-        }
+        isTracked = Tracker.shared?.snapshot().items.contains { $0.path == path } ?? false
         let monitor = ICloudQueueMonitor.shared
         queue = monitor.isWatching ? (monitor.items[path], monitor.stuck.contains(path)) : nil
     }
@@ -213,7 +198,7 @@ struct FileInfoView: View {
                     PathControl(url: URL(fileURLWithPath: model.path))
                 }
                 if let p = model.progress {
-                    LabeledContent(p.direction == .downloading ? "Downloading" : "Uploading") {
+                    LabeledContent(p.direction == .downloading || (p.direction == nil && d.isDownloading) ? "Downloading" : "Uploading") {
                         HStack {
                             ProgressView(value: p.fraction).frame(width: 140)
                             Text("\(p.fraction.formatted(.percent.precision(.fractionLength(0)))) of \(bytes(p.totalBytes))")
@@ -262,13 +247,6 @@ struct FileInfoView: View {
             }
 
             Section {
-                LabeledContent("Last transfer") {
-                    if let entry = model.recorded {
-                        DateText(prefix: entry.kind.verb, date: entry.date)
-                    } else {
-                        Text("Not in history")
-                    }
-                }
                 LabeledContent("Tracked now", value: model.isTracked ? "Yes, in transfer" : "No")
             } header: {
                 Text("SyncGlass")

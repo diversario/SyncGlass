@@ -1,155 +1,66 @@
-<p align="center"><img src="Images/AppIcon.png" width="160" alt="SyncGlass's icon: a magnifying glass over a cloud filled with blue"></p>
-
 # SyncGlass
 
-[![notarized download](https://img.shields.io/github/actions/workflow/status/alberti42/SyncGlass/verify-release.yml?label=notarized%20download&logo=apple)](https://github.com/alberti42/SyncGlass/actions/workflows/verify-release.yml)
-[![build](https://img.shields.io/github/actions/workflow/status/alberti42/SyncGlass/build.yml?branch=main&label=build)](https://github.com/alberti42/SyncGlass/actions/workflows/build.yml)
-[![license](https://img.shields.io/github/license/alberti42/SyncGlass)](LICENSE)
+SyncGlass shows current iCloud Drive transfers in the macOS menu bar.
 
-**A menu-bar app for macOS that shows which files iCloud Drive is uploading and downloading.**
+**Work in progress.** The current build can miss downloads.
 
-**[Download SyncGlass.zip](https://github.com/alberti42/SyncGlass/releases/latest/download/SyncGlass.zip)** (latest release, signed and notarized). See [Installation](#installation).
+## Transfers
 
-Free and open source (GPL-3.0). Requires macOS 15 Sequoia or later (Liquid Glass on macOS 26 and later); runs natively on Apple silicon and Intel Macs.
+- The icon shows uploads, downloads, or both.
+- Click the icon to open the transfer panel.
+- Each direction has its own file count and byte summary.
+- Each list shows up to ten rows. Scroll to see the remaining files.
+- Rows show the filename and its parent folder. Long names lose text at the beginning.
+- Hover over a row to see its full path.
+- Drag a side of the panel to show more of each filename. The app saves the width.
 
-> [!NOTE]
-> **Using an older macOS?** [Open an issue](https://github.com/alberti42/SyncGlass/issues/new) with your macOS version and Mac model. SyncGlass may be able to support it. iCloud Drive behaves differently from one macOS version to the next, so you would get a preview build for your macOS; all it takes is to try it and tell what you see in the issue.
+Byte counts come from progress published by macOS. Some transfers do not publish usable counts. The panel marks those counts as unavailable. A summary marked **Reported** contains only the known bytes. It is not a complete transfer total.
 
-SyncGlass lists iCloud Drive's transfers in one place: how many files are in flight, each file's percentage, and when each transfer finished.
+Counts cover files observed in the watched folders. They do not describe transfers on other devices.
 
-<p align="left"><img src="Images/Screenshot.png" width="416" alt="The SyncGlass panel below its menu-bar icon, with the Recent list of files uploaded and synced in the last 31 seconds"></p>
+## Folder access
 
----
+The default watched folder is iCloud Drive. SyncGlass also watches Desktop and Documents when macOS identifies them as iCloud folders.
 
-## Table of Contents
+The monitor reads filenames and sync metadata. It does not read file contents. It does not request downloads or remove local downloads.
 
-- [Features](#features)
-- [Settings](#settings)
-- [Installation](#installation)
-- [Permissions and privacy](#permissions-and-privacy)
-- [How it works](#how-it-works)
-- [Troubleshooting](#troubleshooting)
-- [Building from source](#building-from-source)
-- [Credits](#credits)
-- [License](#license)
+macOS may ask for access to watched folders. macOS has no separate metadata-only permission. Without access, SyncGlass cannot show complete results for those folders.
 
----
-
-## Features
-
-- **Menu-bar icon** for each state: up to date, uploading, downloading, syncing changes from other devices, offline. The icon is monochrome, so it follows light mode, dark mode and the menu bar's tint. An optional mode fills the cloud as files finish.
-- **Transfers**: the files iCloud is uploading or downloading, each with its percentage and size ("Uploading · 34 % of 209.72 MB").
-- **Recent**: the files that finished transferring, newest first, with the time and direction ("Uploaded 3 min ago").
-- **File Info**: for any listed file, its iCloud status, live percentage, conflicts, upload and download errors, sharing, the last transfer SyncGlass recorded, and every date macOS keeps for the file.
-- **Notifications** when uploads or downloads finish. Short transfers can be left out, and the sound can be chosen.
-- **Filters**: include and exclude regular expressions, matched against the full path.
-- **Transfers across restarts**: syncGlass lists uploads and downloads even when they started before SyncGlass opened: it remembers the files in transfer when it quits, and macOS tells it which files changed while it was not running (the same record of changed files that Time Machine uses). If you think a large upload or download that started before SyncGlass opened is missing from the list, **Scan for Transfers** in Settings > Monitoring checks every file in the folder again and lists the ones that iCloud is still uploading or downloading. The scan takes longer the more files the folder holds.
-- **Watch for Stuck Files** shows which files iCloud Drive is stuck on. See [Troubleshooting](#troubleshooting).
-- **History log** of finished transfers, which opens in Console.
-- **Open at login**, through a login helper registered with macOS.
-- **Updates** through [Sparkle](https://sparkle-project.org): SyncGlass checks for a new version once a week, or when you choose Check for Updates in the panel's menu.
+Photos, Mail, and other iCloud services are not monitored.
 
 ## Settings
 
-- **General**: transfer progress in the menu-bar icon, open at login, and automatic update checks.
-- **Monitoring**: the folder to watch (iCloud Drive, all iCloud documents, or a folder you choose), incoming downloads, hidden files and symbolic links, how many files each pass re-checks, and Scan for Transfers.
-- **Notifications**: notifications when uploads or downloads finish. Short transfers can be left out, downloads that arrive together are grouped, and the sound can be chosen.
-- **History**: the history log and its size limit, the number of recent files to remember, and Clear History.
-- **Filters**: include and exclude regular expressions, matched against the full path.
+Settings keeps the watched-folder choice, path filters, hidden-file and symbolic-link options, download tracking, and manual rescan.
 
-<table>
-  <tr>
-    <td valign="top" width="50%"><img src="Images/Screenshot-monitoring.png" width="100%" alt="Settings, Monitoring tab: the folder, incoming downloads, hidden files, symbolic links, how often to check for changes, and Scan for Transfers"></td>
-    <td valign="top" width="50%"><img src="Images/Screenshot-notifications.png" width="100%" alt="Settings, Notifications tab: notifications for finished uploads and downloads, the minimum transfer time, download grouping, and the sound"></td>
-  </tr>
-</table>
-<table>
-  <tr>
-    <td valign="top" width="50%"><img src="Images/Screenshot-history.png" width="100%" alt="Settings, History tab: the history log, its size limit, the number of recent files, Show Log in Finder and Clear History"></td>
-    <td valign="top" width="50%"><img src="Images/Screenshot-filters.png" width="100%" alt="Settings, Filters tab: the Track Only and Never Track lists of regular expressions"></td>
-  </tr>
-</table>
+Start at login is opt-in. Optional queue diagnostics run only when enabled.
 
-## Installation
+This fork does not keep transfer history. It has no transfer notifications, folder-size scans, or automatic update checks.
 
-1. Download [`SyncGlass.zip`](https://github.com/alberti42/SyncGlass/releases/latest/download/SyncGlass.zip) from the [latest release](https://github.com/alberti42/SyncGlass/releases/latest).
-2. Unzip it and move `SyncGlass.app` to the Applications folder.
-3. Open it. On the first launch, choose whether to watch iCloud Drive or all iCloud documents, whether to open SyncGlass at login, and whether to check for updates automatically.
+## Resource use
 
-The app is signed with a Developer ID and notarized by Apple. To check where a downloaded ZIP was built:
+File events wake the monitor. Metadata checks run in bounded batches. Active files are checked again with increasing delays. There is no repeating metadata check when the monitor is idle.
+
+The transfer panel subscribes to byte progress only while open. Subscription count is bounded. Files without a subscription remain in the lists and counts.
+
+Startup and rescans walk folder metadata. A scan can take time on a large drive. A scan does not retain a full file inventory.
+
+## Build and run
+
+Build on macOS with Xcode command-line tools:
 
 ```sh
-gh attestation verify SyncGlass.zip --repo alberti42/SyncGlass
-```
-
-## Permissions and privacy
-
-- macOS may ask whether SyncGlass can access iCloud Drive. SyncGlass needs that access to read the iCloud state of your files.
-- SyncGlass connects to the network only for updates: it downloads the update feed (`Releases/appcast.xml` in this repository) from GitHub, and, when you install an update, `SyncGlass.zip` from GitHub Releases. Sparkle sends no system profile; the requests carry the names and versions of SyncGlass and Sparkle in the User-Agent header. Turn off "Check for updates automatically" in Settings > General to check only when you choose Check for Updates.
-- SyncGlass collects no data.
-- Its settings (`~/Library/Preferences/io.alberti42.SyncGlass.plist`), history log and recent-files list (`~/Library/Application Support/io.alberti42.SyncGlass/`) stay on your Mac.
-
-## How it works
-
-SyncGlass uses public macOS APIs, plus one undocumented command while Watch for Stuck Files is on:
-
-- **FSEvents** reports which files change in the watched folder (`~/Library/Mobile Documents`, or only its iCloud Drive part). macOS keeps a history of these changes; at launch SyncGlass asks for the changes since it last ran.
-- **URL resource values** (`ubiquitousItemIsUploaded`, `ubiquitousItemIsUploading`, `ubiquitousItemIsDownloading`, …) give each file's iCloud state. A file stays in the Transfers list until iCloud reports it uploaded and no longer downloading.
-- **`Progress.addSubscriber(forFileURL:)`** receives the progress objects that iCloud Drive publishes for each file it transfers. They carry the byte counts behind the percentages.
-- **`brctl status`** (only while Watch for Stuck Files is on) lists the items iCloud Drive has not synced yet, with the time of the last upload attempt. It abbreviates names; SyncGlass identifies each file by its File Provider identifier (`NSFileProviderManager.getIdentifierForUserVisibleFile(at:)`). `brctl` is undocumented, so a macOS update can change its output.
-
-macOS records no date for when a file synced. The times in the Recent list are the moments SyncGlass saw a transfer finish, so they exist only for transfers it watched.
-
-## Troubleshooting
-
-SyncGlass shows iCloud Drive's transfers while they happen. It does not download files that are only in iCloud, and it does not remove local copies. Finder does both: right-click a file and choose **Download Now** or **Remove Download**. To reach a file listed in SyncGlass, click its Show in Finder button or double-click it.
-
-When you have reason to believe that iCloud Drive is stuck on a file, choose **Watch for Stuck Files** in the panel's ⋯ menu, and choose it again once you know which file it is. SyncGlass then reads iCloud Drive's queue at once and every minute. A bar below the panel's header shows when SyncGlass last checked and how many files are stuck; its ⓘ button explains the watch. The menu-bar icon shows a cloud with an exclamation mark while a file is stuck. Files that iCloud has not synced appear in Transfers, stuck files first, also those that started before SyncGlass was running. A file is marked stuck, with a warning symbol and "Waiting · last attempt 4 min ago", when iCloud reports an upload or download error for it, or when it is in iCloud's queue and its upload has not progressed for 2 minutes. Get Info shows the file's entry in the queue and the error. You can turn the watch on after a transfer got stuck: the queue shows its state at the moment SyncGlass reads it.
-
-To print the queue in Terminal:
-
-```sh
-/Applications/SyncGlass.app/Contents/MacOS/SyncGlass --queue-status
-```
-
-If a file stays stuck for a reason other than a missing network connection, please [open an issue](https://github.com/alberti42/SyncGlass/issues) and attach the output of `brctl status`, saved while the file is stuck:
-
-```sh
-brctl status > ~/Desktop/brctl-status.txt
-```
-
-So far we could test only one cause of a stuck file: a missing network connection, which is easy to reproduce. Other causes, such as full iCloud storage or a stuck download, are hard to reproduce. If you send us the output of `brctl status` from a real case, we can improve Watch for Stuck Files to recognize it. Thank you!
-
-`brctl status` abbreviates file names (`o{10}t.bin` for `offline-test.bin`) but shows folder paths in full. Issues are public, so read the file before you attach it, and replace any folder names you don't want to make public.
-
-To see what iCloud Drive itself reports, read its log in Terminal. Write the full path `/usr/bin/log`: in zsh, the default shell on macOS, `log` is also the name of a built-in command.
-
-```sh
-# the last 10 minutes
-/usr/bin/log show --last 10m --style compact --predicate 'process == "bird" OR process == "cloudd" OR subsystem == "com.apple.FileProvider"'
-
-# live, until you press Control-C
-/usr/bin/log stream --style compact --predicate 'process == "bird" OR process == "cloudd" OR subsystem == "com.apple.FileProvider"'
-```
-
-`bird` is the iCloud Drive daemon; `cloudd` transfers the data to Apple's servers and logs network errors, such as `NSURLErrorDomain -1001` (request timed out); `com.apple.FileProvider` is the macOS framework through which iCloud Drive syncs files. The log does not name the files in full: `bird` writes `<private>` in their place, and FileProvider abbreviates them (`o{10}t.bin` for `offline-test.bin`).
-
-## Building from source
-
-Requires Xcode 26 or later.
-
-```sh
-bin/build-app.sh            # build/SyncGlass.app, universal, signed ad hoc
+ARCHS=native bin/build-app.sh
 open build/SyncGlass.app
 ```
 
-`ARCHS=native bin/build-app.sh` builds for this Mac's architecture only. To sign with a Developer ID, set `SIGN_IDENTITY`:
+The local build uses ad-hoc signing. It is not notarized. The login helper is included in the app bundle.
+
+Focused checks:
 
 ```sh
-SIGN_IDENTITY="Developer ID Application: Your Name (TEAMID)" bin/build-app.sh
+swift test --filter 'TransferSummaryTests|MenuBarSymbolTests|TrackerSchedulingTests|ItemStateTests|StartEventIDTests'
 ```
 
-To use your own signing identity, also change the bundle identifiers `io.alberti42.SyncGlass` and `io.alberti42.SyncGlass.LoginHelper` in `Resources/Info.plist`, `Resources/LoginHelper-Info.plist`, `Sources/LoginHelper/main.swift`, `Sources/SyncGlass/LoginItem.swift` and `Sources/SyncGlass/Preferences.swift`. To publish your own updates, set `SUFeedURL` (your appcast) and `SUPublicEDKey` (from Sparkle's `generate_keys`) in `Resources/Info.plist`; otherwise your build offers the updates published in this repository.
 
 ## Credits
 
