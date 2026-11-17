@@ -4,7 +4,14 @@ import SwiftUI
 /// Layout shared by the native window and its content. Progress never changes it.
 enum StatusPanelLayout {
     static let rowHeight: CGFloat = 32
-    static let chromeHeight: CGFloat = 279
+    static let inset: CGFloat = 16
+    static let spacing: CGFloat = 10
+    static let headerHeight: CGFloat = 48
+    static let footerHeight: CGFloat = 28
+    static let sectionInset: CGFloat = 12
+    static let sectionHeaderHeight: CGFloat = 68
+    static let chromeHeight = 2 * inset + headerHeight + footerHeight + 3 * spacing
+        + 2 * (sectionHeaderHeight + 2 * sectionInset)
 
     static func preferredHeight(uploads: Int, downloads: Int) -> CGFloat {
         chromeHeight + CGFloat(min(10, max(1, uploads)) + min(10, max(1, downloads))) * rowHeight
@@ -33,32 +40,34 @@ struct StatusPanel: View {
             let rows = StatusPanelLayout.visibleRows(
                 uploads: model.uploads.fileCount, downloads: model.downloads.fileCount,
                 height: geometry.size.height)
-            VStack(spacing: 0) {
-                header.frame(height: 52)
+            VStack(spacing: StatusPanelLayout.spacing) {
+                header.frame(height: StatusPanelLayout.headerHeight)
                 DirectionSection(model: model, direction: .upload, visibleRows: rows.0,
                                  onClose: onClose, onFileInfo: onFileInfo)
-                Divider()
                 DirectionSection(model: model, direction: .download, visibleRows: rows.1,
                                  onClose: onClose, onFileInfo: onFileInfo)
-                Spacer(minLength: 0)
-                footer.frame(height: 42)
+                footer.frame(height: StatusPanelLayout.footerHeight)
             }
-            .padding(12)
+            .padding(StatusPanelLayout.inset)
         }
-        .background(.regularMaterial)
+        .modifier(PanelSurface())
         .ignoresSafeArea(.container)
     }
 
     private var header: some View {
-        HStack(spacing: 10) {
+        HStack(spacing: 12) {
             Image(systemName: MenuBarIcon.symbol(for: model.snapshot, isReachable: model.isReachable,
                                                 stuckCount: model.stuckCount).rawValue)
-                .font(.title2)
+                .font(.system(size: 22, weight: .medium))
+                .foregroundStyle(.blue.gradient)
+                .frame(width: 42, height: 42)
+                .background(.blue.opacity(0.10), in: RoundedRectangle(cornerRadius: 13))
                 .accessibilityHidden(true)
-            VStack(alignment: .leading, spacing: 2) {
-                Text("iCloud Drive").font(.headline)
+            VStack(alignment: .leading, spacing: 3) {
+                Text("iCloud Drive")
+                    .font(.system(size: 16, weight: .semibold, design: .rounded))
                 Text(statusText)
-                    .font(.caption)
+                    .font(.system(size: 11))
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
                     .help(statusText)
@@ -80,10 +89,16 @@ struct StatusPanel: View {
                     model.showAbout()
                 }
             } label: {
-                Image(systemName: "ellipsis.circle")
+                Image(systemName: "ellipsis")
+                    .font(.system(size: 15, weight: .semibold))
+                    .frame(width: 20, height: 20)
             }
-            .menuStyle(.borderlessButton)
-            .fixedSize()
+            .menuStyle(.button)
+            .menuIndicator(.hidden)
+            .buttonBorderShape(.circle)
+            .modifier(PanelControlStyle())
+            .controlSize(.large)
+            .frame(width: 36, height: 36)
             .help("More")
             .accessibilityLabel("More")
         }
@@ -103,16 +118,22 @@ struct StatusPanel: View {
 
     private var footer: some View {
         HStack {
-            Button("Settings…") {
+            Button {
                 onClose()
                 onSettings()
+            } label: {
+                Label("Settings", systemImage: "gearshape")
             }
             .keyboardShortcut(",", modifiers: .command)
             Spacer()
-            Button("Quit SyncGlass") { NSApp.terminate(nil) }
-                .keyboardShortcut("q", modifiers: .command)
+            Button { NSApp.terminate(nil) } label: {
+                Label("Quit", systemImage: "power")
+            }
+            .keyboardShortcut("q", modifiers: .command)
+            .accessibilityLabel("Quit SyncGlass")
         }
         .controlSize(.small)
+        .modifier(PanelControlStyle())
     }
 }
 
@@ -125,30 +146,49 @@ private struct DirectionSection: View {
 
     private var summary: DirectionSummary { model.summary(for: direction) }
 
+    private var tint: Color { direction == .upload ? .teal : .blue }
+
     var body: some View {
         VStack(spacing: 0) {
-            VStack(alignment: .leading, spacing: 4) {
-                HStack {
-                    Label(direction.title, systemImage: direction == .upload ? "arrow.up" : "arrow.down")
-                        .font(.headline)
-                    Spacer()
-                    Text("\(summary.fileCount) total files")
-                        .font(.caption)
+            VStack(alignment: .leading, spacing: 6) {
+                HStack(spacing: 10) {
+                    Image(systemName: direction == .upload ? "arrow.up" : "arrow.down")
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundStyle(tint)
+                        .frame(width: 30, height: 30)
+                        .background(tint.opacity(0.12), in: RoundedRectangle(cornerRadius: 10))
+                        .accessibilityHidden(true)
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text(direction.title)
+                            .font(.system(size: 13, weight: .semibold))
+                        Text(summary.byteText)
+                            .font(.system(size: 12))
+                            .monospacedDigit()
+                            .lineLimit(1)
+                            .help(summary.byteText)
+                    }
+                    Spacer(minLength: 4)
+                    Text(summary.fileCount == 1 ? "1 file" : "\(summary.fileCount) files")
+                        .font(.system(size: 10, weight: .medium))
+                        .monospacedDigit()
                         .foregroundStyle(.secondary)
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 4)
+                        .background(.primary.opacity(0.05), in: Capsule())
+                        .accessibilityLabel("\(summary.fileCount) total files")
                 }
-                Text(summary.byteText)
-                    .font(.caption)
-                    .monospacedDigit()
-                    .lineLimit(1)
-                    .help(summary.byteText)
-                Text(summary.availabilityText ?? " ")
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-                    .help(summary.availabilityText ?? "")
+                if let availability = summary.availabilityText {
+                    Text(availability)
+                        .font(.system(size: 10))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .help(availability)
+                }
+                Spacer(minLength: 0)
                 if let fraction = summary.fraction {
                     ProgressView(value: fraction)
                         .progressViewStyle(.linear)
+                        .tint(tint)
                         .accessibilityLabel("\(direction.title) byte progress")
                 } else {
                     // An unknown total is not a determinate zero or an animated spinner.
@@ -156,7 +196,7 @@ private struct DirectionSection: View {
                         .accessibilityLabel("\(direction.title) byte total unavailable")
                 }
             }
-            .frame(height: 80)
+            .frame(height: StatusPanelLayout.sectionHeaderHeight)
             if summary.items.isEmpty {
                 Text(direction == .upload ? "No uploads observed" : "No downloads observed")
                     .font(.caption)
@@ -176,6 +216,8 @@ private struct DirectionSection: View {
                 .frame(height: CGFloat(visibleRows) * StatusPanelLayout.rowHeight)
             }
         }
+        .padding(StatusPanelLayout.sectionInset)
+        .background(.primary.opacity(0.035), in: RoundedRectangle(cornerRadius: 16))
     }
 }
 
@@ -187,6 +229,7 @@ private struct TransferRow: View {
     let onFileInfo: (String) -> Void
     private let filename: String
     private let parentName: String
+    @State private var isHovered = false
 
     init(item: TransferItem, direction: TransferDirection, model: StatusModel,
          onClose: @escaping () -> Void, onFileInfo: @escaping (String) -> Void) {
@@ -203,21 +246,25 @@ private struct TransferRow: View {
         GeometryReader { geometry in
             HStack(spacing: 8) {
                 Text(parentName)
+                    .font(.system(size: 12))
                     .foregroundStyle(.secondary)
                     .frame(width: max(56, (geometry.size.width - 100) * 0.3), alignment: .leading)
                 Text(filename)
+                    .font(.system(size: 12, weight: .medium))
                     .frame(maxWidth: .infinity, alignment: .leading)
                 Text(progressText)
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .monospacedDigit()
-                    .frame(width: 76, alignment: .trailing)
+                    .frame(width: 64, alignment: .trailing)
             }
             .font(.callout)
             .lineLimit(1)
             .truncationMode(.head)
-            .padding(.horizontal, 4)
+            .padding(.horizontal, 6)
             .frame(height: StatusPanelLayout.rowHeight)
+            .background(.primary.opacity(isHovered ? 0.06 : 0), in: RoundedRectangle(cornerRadius: 8))
+            .onHover { isHovered = $0 }
             .contentShape(Rectangle())
             .help(helpText)
             .contextMenu {
@@ -257,5 +304,25 @@ private struct TransferRow: View {
         if direction == .upload && item.waitingUpload && !item.active.contains(.upload) { return "Waiting" }
         guard let progress = model.progress(for: item.path, direction: direction) else { return "Unknown" }
         return progress.fraction.formatted(.percent.precision(.fractionLength(0)))
+    }
+}
+
+private struct PanelSurface: ViewModifier {
+    func body(content: Content) -> some View {
+        if #available(macOS 26.0, *) {
+            content.glassEffect(.regular, in: RoundedRectangle(cornerRadius: 24))
+        } else {
+            content.background(.regularMaterial, in: RoundedRectangle(cornerRadius: 24))
+        }
+    }
+}
+
+private struct PanelControlStyle: ViewModifier {
+    func body(content: Content) -> some View {
+        if #available(macOS 26.0, *) {
+            content.buttonStyle(.glass)
+        } else {
+            content.buttonStyle(.bordered)
+        }
     }
 }

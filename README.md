@@ -6,6 +6,7 @@ SyncGlass shows current iCloud Drive transfers in the macOS menu bar.
 
 - The icon shows uploads, downloads, or both.
 - Click the icon to open the transfer panel.
+- The panel uses Liquid Glass on macOS 26 and later. Older macOS versions use a blurred material.
 - Each direction has its own file count and byte summary.
 - Each list shows up to ten rows. Scroll to see the remaining files.
 - Rows show the filename and its parent folder. Long names lose text at the beginning.

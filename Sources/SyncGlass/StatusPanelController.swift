@@ -28,7 +28,8 @@ final class StatusPanelController: NSObject, NSWindowDelegate {
     init(model: StatusModel, onSettings: @escaping () -> Void) {
         self.model = model
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
-        panel = TransferPanel(contentRect: NSRect(x: 0, y: 0, width: 520, height: 343),
+        panel = TransferPanel(contentRect: NSRect(x: 0, y: 0, width: 520,
+                                                 height: StatusPanelLayout.preferredHeight(uploads: 0, downloads: 0)),
                               styleMask: [.titled, .resizable, .fullSizeContentView, .nonactivatingPanel],
                               backing: .buffered, defer: false)
         super.init()
@@ -102,6 +103,7 @@ final class StatusPanelController: NSObject, NSWindowDelegate {
         positionPanel()
         NSApp.activate()
         panel.makeKeyAndOrderFront(nil)
+        panel.makeFirstResponder(nil)
         statusItem.button?.highlight(true)
         installDismissalMonitors()
     }

@@ -7,6 +7,12 @@ import Darwin
 enum Preview {
     static func show(model: StatusModel, controller: StatusPanelController) {
         model.isPreview = true
+        switch argument("--preview-appearance") {
+        case "light": NSApp.appearance = NSAppearance(named: .aqua)
+        case "dark": NSApp.appearance = NSAppearance(named: .darkAqua)
+        case "contrast": NSApp.appearance = NSAppearance(named: .accessibilityHighContrastAqua)
+        default: break
+        }
         let mode = argument("--preview-mode") ?? "mixed"
         let count = max(0, Int(argument("--preview-count") ?? "25") ?? 25)
         var items: [TransferItem] = []
