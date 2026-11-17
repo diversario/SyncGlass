@@ -130,6 +130,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         windowObservers[key] = observer
         NSApp.activate()
         window.makeKeyAndOrderFront(nil)
+        window.makeFirstResponder(nil)
     }
 
     private func printQueueStatus() {
