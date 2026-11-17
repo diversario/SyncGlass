@@ -37,6 +37,8 @@ struct FileProgress: Equatable {
 /// Subscriptions exist only while a panel or an on-demand file window needs them.
 final class FileProgressMonitor: @unchecked Sendable {
     static let maxSubscriptions = 500
+    typealias PublishingHandler = (Progress) -> (() -> Void)?
+    typealias Subscribe = (URL, @escaping PublishingHandler) -> Any
 
     private struct Entry {
         let generation: UUID
@@ -46,6 +48,15 @@ final class FileProgressMonitor: @unchecked Sendable {
 
     private let lock = NSLock()
     private var entries: [String: Entry] = [:]
+    private let subscribe: Subscribe
+    private let unsubscribe: (Any) -> Void
+
+    init(subscribe: @escaping Subscribe = {
+        Progress.addSubscriber(forFileURL: $0, withPublishingHandler: $1)
+    }, unsubscribe: @escaping (Any) -> Void = Progress.removeSubscriber) {
+        self.subscribe = subscribe
+        self.unsubscribe = unsubscribe
+    }
 
     deinit { track([String]()) }
 
@@ -64,7 +75,7 @@ final class FileProgressMonitor: @unchecked Sendable {
             let stale = entries.keys.filter { !wanted.contains($0) }
             return stale.compactMap { entries.removeValue(forKey: $0)?.token }
         }
-        removed.forEach(Progress.removeSubscriber)
+        removed.forEach(unsubscribe)
         for path in ordered {
             let generation = UUID()
             let added = withLock {
@@ -73,7 +84,12 @@ final class FileProgressMonitor: @unchecked Sendable {
                 return true
             }
             guard added else { continue }
-            let token = Progress.addSubscriber(forFileURL: URL(fileURLWithPath: path)) { [weak self] progress in
+            let url = URL(fileURLWithPath: path).standardizedFileURL
+            let expectedPath = url.path
+            let token = subscribe(url) { [weak self] progress in
+                // A package subscription also receives its direct children's progress.
+                guard let publishedURL = progress.userInfo[.fileURLKey] as? URL,
+                      publishedURL.isFileURL, publishedURL.standardizedFileURL.path == expectedPath else { return nil }
                 self?.withLock {
                     guard self?.entries[path]?.generation == generation else { return }
                     self?.entries[path]?.progress = progress
@@ -91,7 +107,7 @@ final class FileProgressMonitor: @unchecked Sendable {
                 entries[path]?.token = token
                 return true
             }
-            if !retained { Progress.removeSubscriber(token) }
+            if !retained { unsubscribe(token) }
         }
     }
 

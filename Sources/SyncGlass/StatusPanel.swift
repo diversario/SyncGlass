@@ -46,6 +46,7 @@ struct StatusPanel: View {
             .padding(12)
         }
         .background(.regularMaterial)
+        .ignoresSafeArea(.container)
     }
 
     private var header: some View {

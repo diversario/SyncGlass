@@ -6,275 +6,6 @@ protocol TrackerDelegate: AnyObject {
     func trackerStatusChanged(_ snapshot: TrackerSnapshot)
 }
 
-/// Deterministic scheduling and metadata state. Its owner serializes every call.
-/// The scheduler returns a cancellation closure; generations also reject callbacks
-/// that were already enqueued when cancellation happened.
-final class TrackerWorkState {
-    typealias Scheduler = (TimeInterval, @escaping () -> Void) -> (() -> Void)
-
-    var batchSize = 25
-    var trackDownloads = true
-    var accepts: (String, ItemState) -> Bool = { _, _ in true }
-    var onSnapshot: (TrackerSnapshot) -> Void = { _ in }
-    var persist: (Set<String>) -> Void = { _ in }
-    private let read: (String) -> ItemState
-    private let schedule: Scheduler
-    private var items: [String: TransferItem] = [:]
-    private var failures: [String: String] = [:]
-    private var pending: [String] = []
-    private var pendingSet = Set<String>()
-    private var pendingIndex = 0
-    private var recheckOrder: [String] = []
-    private var recheckIndex = 0
-    private var orderDirty = false
-    private var sortedPaths: [String] = []
-    private var membershipDirty = false
-    private var savedPaths = Set<String>()
-    private var restoredPaths = Set<String>()
-    private var snapshotDirty = false
-    private var persistenceDirty = false
-    private var scheduledDelay: TimeInterval?
-    private var cancellation: (() -> Void)?
-    private var generation: UInt64 = 0
-    private var backoff = 0
-    private var running = false
-    private var paused = false
-    private var reachable = true
-    private var monitorAvailability: MonitorAvailability = .ready
-    private var scanning = false
-    private(set) var snapshot = TrackerSnapshot()
-
-    init(read: @escaping (String) -> ItemState, schedule: @escaping Scheduler) {
-        self.read = read
-        self.schedule = schedule
-    }
-
-    func start(paths: [String] = [], keeping contains: (String) -> Bool = { _ in true }) {
-        running = true
-        savedPaths = Set(paths)
-        restoredPaths = Set(paths.filter(contains))
-        persistenceDirty = true
-        enqueue(Array(restoredPaths.union(items.keys).union(failures.keys)).sorted())
-        publish()
-    }
-
-    func stop() {
-        running = false
-        cancelPass()
-    }
-
-    func pause() {
-        paused = true
-        cancelPass()
-    }
-
-    func resume() {
-        paused = false
-        wake()
-    }
-
-    func setReachable(_ value: Bool) {
-        reachable = value
-        if value { wake() } else { cancelPass() }
-    }
-
-    /// A new watched scope discards all obsolete pending and scheduled work.
-    func replaceScope(keeping contains: (String) -> Bool) {
-        cancelPass()
-        pending.removeAll()
-        pendingSet.removeAll()
-        pendingIndex = 0
-        for path in Array(items.keys) where !contains(path) { items.removeValue(forKey: path) }
-        for path in Array(failures.keys) where !contains(path) { failures.removeValue(forKey: path) }
-        restoredPaths = restoredPaths.filter(contains)
-        membershipDirty = true
-        orderDirty = true
-        snapshotDirty = true
-        persistenceDirty = true
-        publish()
-        enqueue(Array(items.keys) + Array(failures.keys) + Array(restoredPaths))
-    }
-
-    func enqueue(_ paths: [String]) {
-        guard running else { return }
-        for path in paths where pendingSet.insert(path).inserted { pending.append(path) }
-        if !paths.isEmpty { wake() }
-    }
-
-    /// Scanning supplies already-read metadata, retaining only candidates/errors.
-    func ingest(_ candidates: [(String, ItemState)]) {
-        guard running, !candidates.isEmpty else { return }
-        let previous = snapshot
-        for (path, state) in candidates { apply(path, state: state) }
-        publish()
-        if previous != snapshot { wake(immediate: false) }
-    }
-
-    func remove(_ paths: [String]) {
-        for path in paths {
-            items.removeValue(forKey: path)
-            failures.removeValue(forKey: path)
-            pendingSet.remove(path)
-            restoredPaths.remove(path)
-        }
-        membershipDirty = true
-        orderDirty = true
-        snapshotDirty = true
-        persistenceDirty = true
-        publish()
-        wake(immediate: false)
-    }
-
-    func setMonitor(availability: MonitorAvailability, scanning: Bool) {
-        if monitorAvailability != availability || self.scanning != scanning { snapshotDirty = true }
-        monitorAvailability = availability
-        self.scanning = scanning
-        publish()
-    }
-
-    func preferencesChanged() {
-        enqueue(Array(items.keys) + Array(failures.keys))
-    }
-
-    private var canWork: Bool { running && !paused && reachable }
-    private var hasWork: Bool { !pendingSet.isEmpty || !items.isEmpty || !failures.isEmpty }
-
-    private func cancelPass() {
-        generation &+= 1
-        cancellation?()
-        cancellation = nil
-        scheduledDelay = nil
-    }
-
-    private func wake(immediate: Bool = true) {
-        backoff = 0
-        // Streaming discovery must not keep pushing an already-near pass out.
-        if !immediate, canWork, hasWork, let scheduledDelay, scheduledDelay <= 1 { return }
-        cancelPass()
-        guard canWork, hasWork else { return }
-        schedulePass(after: immediate ? 0 : 1)
-    }
-
-    private func schedulePass(after delay: TimeInterval) {
-        guard cancellation == nil, canWork, hasWork else { return }
-        let token = generation
-        scheduledDelay = delay
-        cancellation = schedule(delay) { [weak self] in
-            guard let self, self.generation == token, self.canWork else { return }
-            self.cancellation = nil
-            self.scheduledDelay = nil
-            self.pass()
-        }
-    }
-
-    private func pass() {
-        let previous = snapshot
-        var checked = Set<String>()
-        let limit = max(1, batchSize)
-        while checked.count < limit && pendingIndex < pending.count {
-            let path = pending[pendingIndex]
-            pendingIndex += 1
-            guard pendingSet.remove(path) != nil else { continue }
-            checked.insert(path)
-            apply(path, state: read(path))
-        }
-        if pendingIndex == pending.count {
-            pending.removeAll(keepingCapacity: true)
-            pendingIndex = 0
-        }
-        if orderDirty {
-            recheckOrder = Array(Set(items.keys).union(failures.keys)).sorted()
-            recheckIndex = 0
-            orderDirty = false
-        }
-        // A path is read at most once per pass, including newly discovered work.
-        var visited = 0
-        while checked.count < limit && visited < recheckOrder.count {
-            if recheckIndex >= recheckOrder.count { recheckIndex = 0 }
-            let path = recheckOrder[recheckIndex]
-            recheckIndex += 1
-            visited += 1
-            guard !checked.contains(path), items[path] != nil || failures[path] != nil else { continue }
-            checked.insert(path)
-            apply(path, state: read(path))
-        }
-        publish()
-        guard canWork, hasWork else { return }
-        if !pendingSet.isEmpty {
-            schedulePass(after: 0)
-        } else {
-            let delays: [TimeInterval] = [1, 2, 5, 10]
-            if previous != snapshot { backoff = 0 }
-            let delay = delays[backoff]
-            backoff = min(backoff + 1, delays.count - 1)
-            schedulePass(after: delay)
-        }
-    }
-
-    private func apply(_ path: String, state: ItemState) {
-        let old = items[path]
-        if restoredPaths.remove(path) != nil { persistenceDirty = true }
-        let hadFailure = failures[path] != nil
-        let previousFailure = failures[path]
-        switch state.phase(trackDownloads: trackDownloads) {
-        case .unavailable(let message):
-            failures[path] = message
-            if var item = old {
-                item.error = message
-                items[path] = item
-            }
-        case .inFlight(let active, let waiting):
-            failures.removeValue(forKey: path)
-            // Discovery filters do not turn an existing transfer into completion.
-            if old != nil || accepts(path, state) {
-                items[path] = TransferItem(path: path, active: active, waitingUpload: waiting, error: state.transferError)
-            } else {
-                items.removeValue(forKey: path)
-            }
-        case .ignored, .current:
-            failures.removeValue(forKey: path)
-            items.removeValue(forKey: path)
-        }
-        let membershipChanged = (old == nil) != (items[path] == nil)
-        if old != items[path] || previousFailure != failures[path] { snapshotDirty = true }
-        if membershipChanged { membershipDirty = true }
-        if membershipChanged || hadFailure != (failures[path] != nil) {
-            orderDirty = true
-            persistenceDirty = true
-        }
-    }
-
-    private func publish() {
-        if persistenceDirty {
-            persistenceDirty = false
-            let paths = Set(items.keys).union(failures.keys).union(restoredPaths)
-            if paths != savedPaths {
-                savedPaths = paths
-                persist(paths)
-            }
-        }
-        guard snapshotDirty else { return }
-        snapshotDirty = false
-        if membershipDirty {
-            sortedPaths = items.keys.sorted()
-            membershipDirty = false
-        }
-        let availability: MonitorAvailability
-        if case .unavailable = monitorAvailability {
-            availability = monitorAvailability
-        } else if let path = failures.keys.min(), let error = failures[path] {
-            availability = .unavailable("Cannot read metadata for \(path): \(error)")
-        } else {
-            availability = .ready
-        }
-        let next = TrackerSnapshot(items: sortedPaths.compactMap { items[$0] },
-                                   availability: availability, isScanning: scanning)
-        if next != snapshot {
-            snapshot = next
-            onSnapshot(next)
-        }
-    }
-}
 
 /// FSEvents, discovery, metadata reads, and scheduling all share one utility queue.
 final class Tracker: @unchecked Sendable {
@@ -290,17 +21,25 @@ final class Tracker: @unchecked Sendable {
     private var roots: [String] = []
     private var running = false
     private var stream: FSEventStreamRef?
-    private var presenters: [DirectoryPresenter] = []
-    private lazy var presenterDispatchQueue = DispatchQueue(label: "SyncGlass.file-presenter",
-        qos: .utility, autoreleaseFrequency: .workItem)
-    private lazy var presenterQueue: OperationQueue = {
-        let operations = OperationQueue()
-        operations.name = "SyncGlass.file-presenters"
-        operations.maxConcurrentOperationCount = 1
-        operations.qualityOfService = .utility
-        operations.underlyingQueue = presenterDispatchQueue
-        return operations
-    }()
+    private lazy var progressMonitor = DirectoryProgressMonitor(queue: queue, changed: { [weak self] path, published in
+        guard let self, self.running, self.isInScope(path) else { return }
+        self.work.progressChanged(path, published: published)
+    })
+    private lazy var directoryDiscovery = DirectoryDiscovery(queue: queue, monitor: progressMonitor,
+        completed: { [weak self] error in
+            guard let self, self.running else { return }
+            self.discoveryError = error
+            let failure = self.streamError ?? error
+            self.work.setMonitor(availability: failure.map { .unavailable($0) } ?? .ready, scanning: true)
+            let token = self.scanGeneration
+            self.queue.async { [weak self] in self?.scanChunk(generation: token) }
+        }, failed: { [weak self] error in
+            guard let self, self.running else { return }
+            self.discoveryError = error
+            self.work.setMonitor(availability: .unavailable(error), scanning: self.work.snapshot.isScanning)
+        })
+    private var discoveryError: String?
+    private var scannedIgnoreHidden: Bool?
     private var streamGeneration: UInt64 = 0
     private var scanGeneration: UInt64 = 0
     private var scan: FileManager.DirectoryEnumerator?
@@ -372,6 +111,7 @@ final class Tracker: @unchecked Sendable {
             work.stop()
             scanGeneration &+= 1
             scan = nil
+            directoryDiscovery.stop()
             stopStream()
             saveLastEventID()
         }
@@ -430,6 +170,7 @@ final class Tracker: @unchecked Sendable {
             guard let self else { return }
             self.configurePreferences()
             self.work.preferencesChanged()
+            if self.running, self.scannedIgnoreHidden != Prefs.ignoreHiddenFiles { self.beginScan() }
         }
     }
 
@@ -483,8 +224,6 @@ final class Tracker: @unchecked Sendable {
 
     private func stopStream() {
         streamGeneration &+= 1
-        for presenter in presenters { NSFileCoordinator.removeFilePresenter(presenter) }
-        presenters.removeAll()
         if let stream {
             FSEventStreamStop(stream)
             FSEventStreamInvalidate(stream)
@@ -496,20 +235,6 @@ final class Tracker: @unchecked Sendable {
     private func startStream() {
         stopStream()
         streamError = nil
-        let generation = streamGeneration
-        presenters = roots.map { root in
-            let presenter = DirectoryPresenter(directory: URL(fileURLWithPath: root, isDirectory: true),
-                                                queue: presenterQueue) { [weak self] url in
-                let path = Self.normalized(url.path)
-                self?.queue.async { [weak self] in
-                    guard let self, self.running, self.streamGeneration == generation,
-                          self.isInScope(path) else { return }
-                    self.work.enqueue([path])
-                }
-            }
-            NSFileCoordinator.addFilePresenter(presenter)
-            return presenter
-        }
         let contextObject = TrackerStreamContext(tracker: self, generation: streamGeneration)
         var context = FSEventStreamContext(version: 0,
             info: Unmanaged.passUnretained(contextObject).toOpaque(),
@@ -563,6 +288,10 @@ final class Tracker: @unchecked Sendable {
             if wrapped || flags & FSEventStreamEventFlags(kFSEventStreamEventFlagRootChanged) != 0 { startStream() }
             beginScan()
         } else if flags & FSEventStreamEventFlags(kFSEventStreamEventFlagHistoryDone) == 0, isInScope(path) {
+            directoryDiscovery.changed(path,
+                isDirectory: flags & FSEventStreamEventFlags(kFSEventStreamEventFlagItemIsDir) != 0,
+                replaced: flags & FSEventStreamEventFlags(kFSEventStreamEventFlagItemRemoved
+                    | kFSEventStreamEventFlagItemRenamed) != 0)
             work.enqueue([path])
         }
     }
@@ -579,8 +308,8 @@ final class Tracker: @unchecked Sendable {
         scanRootIndex = 0
         scanErrors.removeAll()
         work.setMonitor(availability: streamError.map { .unavailable($0) } ?? work.snapshot.availability, scanning: true)
-        let token = scanGeneration
-        queue.async { [weak self] in self?.scanChunk(generation: token) }
+        scannedIgnoreHidden = Prefs.ignoreHiddenFiles
+        directoryDiscovery.scan(roots: roots, ignoreHidden: Prefs.ignoreHiddenFiles)
     }
 
     /// No contents, downloads, size aggregation, or full-tree inventory.
@@ -592,7 +321,7 @@ final class Tracker: @unchecked Sendable {
         while inspected < limit {
             if scan == nil {
                 guard scanRootIndex < roots.count else {
-                    let error = streamError ?? scanErrors.first
+                    let error = streamError ?? discoveryError ?? scanErrors.first
                     work.ingest(candidates)
                     work.setMonitor(availability: error.map { .unavailable($0) } ?? .ready, scanning: false)
                     return

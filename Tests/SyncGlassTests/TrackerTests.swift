@@ -256,6 +256,256 @@ import Testing
         #expect(h.reads.count == 75)
     }
 
+    @Test func publicationRechecksCurrentMetadataUntilDownloadFlagsArrive() {
+        let h = TrackerHarness()
+        h.metadata["/short"] = ItemState()
+        h.work.start()
+        h.work.progressChanged("/short", published: true)
+        #expect(h.work.snapshot.items.isEmpty)
+        #expect(h.clock.active.map(\.delay) == [0])
+        h.clock.fireNext()
+        #expect(h.work.snapshot.activeDirections.isEmpty)
+        #expect(h.emissions.isEmpty)
+        #expect(h.persisted.isEmpty)
+        #expect(h.clock.active.map(\.delay) == [1])
+        h.clock.fireNext()
+        #expect(h.clock.active.map(\.delay) == [2])
+        h.metadata["/short"] = ItemState(isDownloading: true)
+        h.clock.fireNext()
+        #expect(h.reads == ["/short", "/short", "/short"])
+        #expect(h.work.snapshot.items.map(\.path) == ["/short"])
+        #expect(h.work.snapshot.activeDirections == .download)
+        #expect(h.persisted == [Set(["/short"])])
+        h.metadata["/short"] = ItemState()
+        h.clock.fireNext()
+        #expect(h.work.snapshot.items.isEmpty)
+        #expect(h.persisted == [Set(["/short"]), Set<String>()])
+        #expect(h.clock.active.map(\.delay) == [1])
+        h.work.progressChanged("/short", published: false)
+        #expect(h.clock.active.map(\.delay) == [0])
+        h.clock.fireNext()
+        #expect(h.reads.count == 5)
+        #expect(h.clock.active.isEmpty)
+    }
+
+    @Test func repeatedPublicationSignalsBeatEventBacklogWithoutDuplicateChecks() {
+        let h = TrackerHarness()
+        h.work.batchSize = 2
+        h.metadata["/short"] = ItemState()
+        h.work.start()
+        h.work.progressChanged("/short", published: true)
+        h.clock.fireNext()
+        h.reads.removeAll()
+        h.metadata["/short"] = ItemState(isDownloading: true)
+        h.work.enqueue(["/event-0", "/event-1", "/short", "/event-2"])
+        h.work.progressChanged("/short", published: true)
+        h.work.progressChanged("/short", published: true)
+        h.clock.fireNext()
+        #expect(h.reads == ["/short", "/event-0"])
+        #expect(h.work.snapshot.activeDirections == .download)
+        #expect(h.clock.active.map(\.delay) == [0])
+        h.clock.fireNext()
+        #expect(h.reads == ["/short", "/event-0", "/event-1", "/event-2"])
+        #expect(h.clock.active.map(\.delay) == [1])
+        h.work.progressChanged("/short", published: true)
+        #expect(h.clock.active.map(\.delay) == [0])
+        h.clock.fireNext()
+        #expect(h.reads.suffix(1) == ["/short"])
+        #expect(h.clock.active.map(\.delay) == [1])
+    }
+
+    @Test func publicationChecksShareTheBudgetAndRecheckRoundRobin() {
+        let h = TrackerHarness()
+        h.work.batchSize = 2
+        let paths = (0..<5).map { "/published-\($0)" }
+        h.work.start()
+        for path in paths {
+            h.metadata[path] = ItemState()
+            h.work.progressChanged(path, published: true)
+        }
+        h.clock.fireNext()
+        #expect(h.reads == Array(paths.prefix(2)))
+        #expect(h.clock.active.map(\.delay) == [0])
+        h.clock.fireNext()
+        #expect(h.reads == Array(paths.prefix(4)))
+        #expect(h.clock.active.map(\.delay) == [0])
+        h.clock.fireNext()
+        #expect(h.reads.count == 6)
+        #expect(Set(h.reads) == Set(paths))
+        h.reads.removeAll()
+        for _ in 0..<3 {
+            let before = h.reads.count
+            h.clock.fireNext()
+            #expect(h.reads.count - before == 2)
+            #expect(Set(h.reads.suffix(2)).count == 2)
+        }
+        #expect(Set(h.reads) == Set(paths))
+        #expect(h.work.snapshot.items.isEmpty)
+        #expect(h.emissions.isEmpty)
+        #expect(h.persisted.isEmpty)
+    }
+
+    @Test func newPublicationsPreserveTheRoundRobinCursor() {
+        let h = TrackerHarness()
+        h.work.batchSize = 1
+        h.work.start()
+        for path in ["/a", "/b", "/c"] {
+            h.metadata[path] = ItemState()
+            h.work.progressChanged(path, published: true)
+        }
+        for _ in 0..<4 { h.clock.fireNext() }
+        #expect(h.reads == ["/a", "/b", "/c", "/a"])
+        h.metadata["/0"] = ItemState()
+        h.work.progressChanged("/0", published: true)
+        h.clock.fireNext()
+        h.metadata["/b"] = ItemState(isDownloading: true)
+        h.clock.fireNext()
+        #expect(h.reads.suffix(2) == ["/0", "/b"])
+        #expect(h.work.snapshot.items.map(\.path) == ["/b"])
+        #expect(h.work.snapshot.activeDirections == .download)
+    }
+
+    @Test func unpublicationChecksMetadataWithoutFinishingAnActiveUpload() {
+        let h = TrackerHarness()
+        h.metadata["/upload"] = ItemState(isUploaded: false, isUploading: true)
+        h.work.start()
+        h.work.progressChanged("/upload", published: true)
+        h.clock.fireNext()
+        #expect(h.work.snapshot.activeDirections == .upload)
+        h.work.enqueue(["/event"])
+        h.work.progressChanged("/upload", published: false)
+        #expect(h.work.snapshot.activeDirections == .upload)
+        #expect(h.emissions.count == 1)
+        #expect(h.clock.active.map(\.delay) == [0])
+        h.clock.fireNext()
+        #expect(h.reads == ["/upload", "/upload", "/event"])
+        #expect(h.work.snapshot.activeDirections == .upload)
+        #expect(h.persisted == [Set(["/upload"])])
+        #expect(h.clock.active.map(\.delay) == [1])
+        h.metadata["/upload"] = ItemState()
+        h.clock.fireNext()
+        #expect(h.work.snapshot.items.isEmpty)
+        #expect(h.persisted == [Set(["/upload"]), Set<String>()])
+        #expect(h.clock.active.isEmpty)
+    }
+
+    @Test func publicationChangesRespectPauseAndReachability() {
+        let h = TrackerHarness()
+        h.metadata["/short"] = ItemState()
+        h.work.start()
+        h.work.pause()
+        h.work.progressChanged("/short", published: true)
+        #expect(h.clock.active.isEmpty)
+        h.work.resume()
+        h.clock.fireNext()
+        let stale = h.clock.active.first!
+        h.work.setReachable(false)
+        stale.body()
+        h.metadata["/short"] = ItemState(isDownloading: true)
+        h.work.progressChanged("/short", published: true)
+        #expect(h.reads == ["/short"])
+        #expect(h.work.snapshot.items.isEmpty)
+        #expect(h.clock.active.isEmpty)
+        h.work.setReachable(true)
+        #expect(h.clock.active.map(\.delay) == [0])
+        h.clock.fireNext()
+        #expect(h.work.snapshot.activeDirections == .download)
+        h.work.pause()
+        h.work.progressChanged("/short", published: false)
+        h.metadata["/short"] = ItemState()
+        #expect(h.clock.active.isEmpty)
+        h.work.resume()
+        h.clock.fireNext()
+        #expect(h.work.snapshot.items.isEmpty)
+        #expect(h.clock.active.isEmpty)
+    }
+
+    @Test func stoppingDiscardsPublicationRetentionAndPendingSignals() {
+        let h = TrackerHarness()
+        h.metadata["/current"] = ItemState()
+        h.metadata["/pending"] = ItemState(isDownloading: true)
+        h.work.start()
+        h.work.progressChanged("/current", published: true)
+        h.clock.fireNext()
+        let stale = h.clock.active.first!
+        h.work.replaceScope(keeping: { _ in true })
+        h.work.progressChanged("/pending", published: true)
+        let pending = h.clock.active.first!
+        h.work.stop()
+        stale.body()
+        pending.body()
+        h.work.progressChanged("/late", published: true)
+        h.work.progressChanged("/current", published: false)
+        #expect(h.reads == ["/current"])
+        #expect(h.work.snapshot.items.isEmpty)
+        #expect(h.clock.active.isEmpty)
+        h.work.start()
+        #expect(h.clock.active.isEmpty)
+        #expect(h.persisted.isEmpty)
+    }
+
+    @Test func scopeChangesDiscardObsoletePublicationWorkAndKeepLiveCandidates() {
+        let h = TrackerHarness()
+        h.metadata["/old/current"] = ItemState()
+        h.metadata["/old/pending"] = ItemState(isDownloading: true)
+        h.metadata["/new/current"] = ItemState()
+        h.work.start()
+        h.work.progressChanged("/old/current", published: true)
+        h.work.progressChanged("/new/current", published: true)
+        h.clock.fireNext()
+        h.work.progressChanged("/old/pending", published: true)
+        let stale = h.clock.active.first!
+        h.work.replaceScope(keeping: { $0.hasPrefix("/new/") })
+        stale.body()
+        h.metadata["/new/current"] = ItemState(isDownloading: true)
+        h.clock.fireNext()
+        #expect(h.reads == ["/old/current", "/new/current", "/new/current"])
+        #expect(h.work.snapshot.items.map(\.path) == ["/new/current"])
+        #expect(h.work.snapshot.activeDirections == .download)
+        h.work.progressChanged("/new/current", published: false)
+        let obsolete = h.clock.active.first!
+        h.work.replaceScope(keeping: { _ in false })
+        obsolete.body()
+        #expect(h.clock.active.isEmpty)
+        #expect(h.work.snapshot.items.isEmpty)
+        #expect(h.reads.count == 3)
+        #expect(h.persisted == [Set(["/new/current"]), Set<String>()])
+    }
+
+    @Test func scopeChangesKeepAFinalCheckForAnUnpublishedCurrentPath() {
+        let h = TrackerHarness()
+        h.metadata["/kept/current"] = ItemState()
+        h.work.start()
+        h.work.progressChanged("/kept/current", published: true)
+        h.clock.fireNext()
+        h.work.progressChanged("/kept/current", published: false)
+        let stale = h.clock.active.first!
+        h.work.replaceScope(keeping: { $0.hasPrefix("/kept/") })
+        stale.body()
+        #expect(h.clock.active.map(\.delay) == [0])
+        h.clock.fireNext()
+        #expect(h.reads == ["/kept/current", "/kept/current"])
+        #expect(h.work.snapshot.items.isEmpty)
+        #expect(h.clock.active.isEmpty)
+        #expect(h.persisted.isEmpty)
+    }
+
+    @Test func removalDiscardsPublicationOnlyCandidatesAndPriorityChecks() {
+        let h = TrackerHarness()
+        h.metadata["/removed"] = ItemState()
+        h.work.start()
+        h.work.progressChanged("/removed", published: true)
+        h.clock.fireNext()
+        h.work.progressChanged("/removed", published: true)
+        let stale = h.clock.active.first!
+        h.work.remove(["/removed"])
+        stale.body()
+        #expect(h.reads == ["/removed"])
+        #expect(h.work.snapshot.items.isEmpty)
+        #expect(h.clock.active.isEmpty)
+        #expect(h.persisted.isEmpty)
+    }
+
     @Test func streamingScanRetainsOnlyCandidatesAndPublishesAvailability() {
         let h = TrackerHarness()
         h.work.start()

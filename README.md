@@ -2,8 +2,6 @@
 
 SyncGlass shows current iCloud Drive transfers in the macOS menu bar.
 
-**Work in progress.** The current build can miss downloads.
-
 ## Transfers
 
 - The icon shows uploads, downloads, or both.
@@ -38,11 +36,11 @@ This fork does not keep transfer history. It has no transfer notifications, fold
 
 ## Resource use
 
-File events wake the monitor. Metadata checks run in bounded batches. Active files are checked again with increasing delays. There is no repeating metadata check when the monitor is idle.
+File events and published file progress wake the monitor. Metadata checks run in bounded batches. Active files are checked again with increasing delays. There is no repeating metadata check when the monitor is idle.
 
-The transfer panel subscribes to byte progress only while open. Subscription count is bounded. Files without a subscription remain in the lists and counts.
+Each ordinary folder has a public `Progress` subscription to discover short transfers. The transfer panel adds exact-file byte subscriptions only while open. These byte subscriptions are capped at 500. Files without a byte subscription remain in the lists and counts.
 
-Startup and rescans walk folder metadata. A scan can take time on a large drive. A scan does not retain a full file inventory.
+Startup first walks folders to register progress subscriptions. It then scans iCloud metadata to find transfers already in progress. Rescans repeat these walks. A scan can take time on a large drive. A scan does not retain a full file inventory.
 
 ## Build and run
 
@@ -58,7 +56,7 @@ The local build uses ad-hoc signing. It is not notarized. The login helper is in
 Focused checks:
 
 ```sh
-swift test --filter 'TransferSummaryTests|MenuBarSymbolTests|TrackerSchedulingTests|ItemStateTests|StartEventIDTests'
+swift test --filter 'TransferSummaryTests|MenuBarSymbolTests|TrackerSchedulingTests|ItemStateTests|StartEventIDTests|DirectoryProgressMonitorTests|FileProgressMonitorTests'
 ```
 
 
